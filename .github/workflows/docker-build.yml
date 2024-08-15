@@ -2,7 +2,7 @@ name: Publish Docker image
 on:
   push:
     branches:
-      - 'master'
+      - 'image/**'
     tags:
       - '*'
     paths-ignore:
@@ -12,7 +12,7 @@ on:
 jobs:
   build_and_publish:
     runs-on: ubuntu-latest
-    if: ${{ github.repository_owner == 'valhalla' }}
+    if: ${{ github.repository_owner == 'kinkard' }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@v3
@@ -38,14 +38,11 @@ jobs:
           docker buildx create --name mybuilder
           docker buildx use mybuilder
           docker buildx inspect --bootstrap
-          docker buildx build --push --platform linux/amd64,linux/arm64 --tag ghcr.io/valhalla/valhalla:${{ steps.extract_tag.outputs.tag }} .
+          docker buildx build --push --platform linux/amd64,linux/arm64 --tag ghcr.io/kinkard/valhalla:${{ steps.extract_tag.outputs.tag }} .
       - name: Build latest image
-        if: github.ref == 'refs/heads/master'
+        # if: github.ref == 'refs/heads/master'
         run: |
-          sudo apt update --yes
-          sudo apt install --yes --quiet binfmt-support qemu-user-static qemu-system
-          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
           docker buildx create --name mybuilder
           docker buildx use mybuilder
           docker buildx inspect --bootstrap
-          docker buildx build --push --platform linux/amd64,linux/arm64 --tag ghcr.io/valhalla/valhalla:latest .
+          docker buildx build --push --platform linux/amd64 --tag ghcr.io/kinkard/valhalla:${GITHUB_REF##*/} .
