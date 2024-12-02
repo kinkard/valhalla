@@ -1,5 +1,6 @@
 if (ENABLE_SANITIZERS)
   set(ENABLE_ADDRESS_SANITIZER ON)
+  # Do not enable thread sanitizer together with address sanitizer as it is not supported.
   set(ENABLE_UNDEFINED_SANITIZER ON)
 endif()
 
@@ -17,6 +18,16 @@ if(ENABLE_ADDRESS_SANITIZER)
   append_flags_if_supported(SANITIZER_FLAGS_LIST -fsanitize=address -fno-omit-frame-pointer -fno-optimize-sibling-calls)
   append_flags_if_supported(SANITIZER_EXE_LINKER_FLAGS_LIST -fsanitize=address)
   append_flags_if_supported(SANITIZER_SHARED_LINKER_FLAGS_LIST -fsanitize=address)
+  set(CMAKE_REQUIRED_FLAGS ${OLD_CMAKE_REQUIRED_FLAGS})
+endif()
+
+if(ENABLE_THREAD_SANITIZER)
+  message(STATUS "Enabling thread sanitizer (TSan).")
+  set(OLD_CMAKE_REQUIRED_FLAGS ${CMAKE_REQUIRED_FLAGS})
+  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -fsanitize=thread")
+  append_flags_if_supported(SANITIZER_FLAGS_LIST -fsanitize=thread -fno-omit-frame-pointer)
+  append_flags_if_supported(SANITIZER_EXE_LINKER_FLAGS_LIST -fsanitize=thread)
+  append_flags_if_supported(SANITIZER_SHARED_LINKER_FLAGS_LIST -fsanitize=thread)
   set(CMAKE_REQUIRED_FLAGS ${OLD_CMAKE_REQUIRED_FLAGS})
 endif()
 
