@@ -4965,7 +4965,7 @@ struct graph_parser {
 
   // WayCallback tag handlers
   using TagHandler = std::function<void()>;
-  std::unordered_map<std::string, TagHandler> tag_handlers_;
+  robin_hood::unordered_flat_map<std::string, TagHandler> tag_handlers_;
   // Tag handlers capture these fields
   OSMWay way_;
   robin_hood::pair<std::string, std::string> tag_;
