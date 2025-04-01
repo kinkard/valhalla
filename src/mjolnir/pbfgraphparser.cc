@@ -4983,8 +4983,8 @@ struct graph_parser {
   bool has_surface_ = true;
   bool has_surface_tag_ = true, has_tracktype_tag_ = true;
   OSMAccess osm_access_;
-  robin_hood::unordered_map<std::pair<uint8_t, uint8_t>, uint32_t> pronunciationMap;
-  robin_hood::unordered_map<std::pair<uint8_t, uint8_t>, uint32_t> langMap;
+  robin_hood::unordered_flat_map<std::pair<uint8_t, uint8_t>, uint32_t> pronunciationMap;
+  robin_hood::unordered_flat_map<std::pair<uint8_t, uint8_t>, uint32_t> langMap;
   bool has_user_tags_ = false, has_pronunciation_tags_ = false;
 
   std::string ref_, ref_language_, ref_w_lang_, ref_left_, ref_right_, ref_lang_left_,
