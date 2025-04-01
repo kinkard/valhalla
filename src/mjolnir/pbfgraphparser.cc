@@ -28,6 +28,16 @@ using namespace valhalla::midgard;
 using namespace valhalla::baldr;
 using namespace valhalla::mjolnir;
 
+namespace robin_hood {
+template<>
+struct hash<std::pair<unsigned char, unsigned char>> {
+    size_t operator()(const std::pair<unsigned char, unsigned char>& p) const {
+        uint16_t pair = (p.first << 8) | p.second;
+        return std::hash<uint16_t>{}(pair);
+    }
+};
+} // namespace robin_hood
+
 namespace {
 
 // `sequence<T>`-compatible writer that offloads writing to a separate thread
@@ -4973,8 +4983,8 @@ struct graph_parser {
   bool has_surface_ = true;
   bool has_surface_tag_ = true, has_tracktype_tag_ = true;
   OSMAccess osm_access_;
-  std::map<std::pair<uint8_t, uint8_t>, uint32_t> pronunciationMap;
-  std::map<std::pair<uint8_t, uint8_t>, uint32_t> langMap;
+  robin_hood::unordered_map<std::pair<uint8_t, uint8_t>, uint32_t> pronunciationMap;
+  robin_hood::unordered_map<std::pair<uint8_t, uint8_t>, uint32_t> langMap;
   bool has_user_tags_ = false, has_pronunciation_tags_ = false;
 
   std::string ref_, ref_language_, ref_w_lang_, ref_left_, ref_right_, ref_lang_left_,
