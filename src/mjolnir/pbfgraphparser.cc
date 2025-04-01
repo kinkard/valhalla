@@ -4323,7 +4323,7 @@ struct graph_parser {
 
   // lets the sequences be set and reset
   void reset(sequence<OSMWayNode>* way_nodes,
-             sequence<OSMAccess>* access,
+             sequence_writer<OSMAccess>* access,
              sequence<OSMRestriction>* complex_restrictions_from,
              sequence<OSMRestriction>* complex_restrictions_to,
              sequence<OSMBSSNode>* bss_nodes,
@@ -5126,7 +5126,7 @@ struct graph_parser {
   std::vector<OSMWayNode> way_nodes_buffer_;
 
   // user entered access
-  std::unique_ptr<sequence<OSMAccess>> access_;
+  std::unique_ptr<sequence_writer<OSMAccess>> access_;
 
   // from complex restrictions
   std::unique_ptr<sequence<OSMRestriction>> complex_restrictions_from_;
@@ -5194,7 +5194,7 @@ OSMData PBFGraphParser::ParseWays(const boost::property_tree::ptree& pt,
 
   LOG_INFO("Parsing files for ways: " + boost::algorithm::join(input_files, ", "));
 
-  parser.reset(nullptr, new sequence<OSMAccess>(access_file, true), nullptr, nullptr, nullptr,
+  parser.reset(nullptr, new sequence_writer<OSMAccess>(access_file), nullptr, nullptr, nullptr,
                nullptr, new sequence_writer<OSMWay>(ways_file),
                new sequence_writer<OSMWayNode>(way_nodes_file));
   // Parse the ways and find all node Ids needed (those that are part of a
