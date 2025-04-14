@@ -510,11 +510,21 @@ void BuildTileSet(const std::string& ways_file,
       language_poly_index language_polys;
 
       if (admin_db_handle) {
+        const AABB2<PointLL> tile_bbox = tiling.TileBounds(id);
         admin_polys = GetAdminInfo(admin_db_handle, drive_on_right, allow_intersection_names,
-                                   language_polys, tiling.TileBounds(id), graphtile);
+                                   language_polys, tile_bbox, graphtile);
         if (admin_polys.size() == 1) {
           // TODO - check if tile bounding box is entirely inside the polygon...
           tile_within_one_admin = true;
+        }
+
+        // Simplify poly for faster calculus.
+        const bg::model::box<point_type> bbox{{tile_bbox.minx(), tile_bbox.miny()},
+                                              {tile_bbox.maxx(), tile_bbox.maxy()}};
+        for (auto& [level, poly] : admin_polys) {
+          multi_polygon_type clipped;
+          bg::intersection(bbox, poly, clipped);
+          poly = clipped;
         }
       }
 
