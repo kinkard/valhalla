@@ -509,6 +509,8 @@ void BuildTileSet(const std::string& ways_file,
       std::unordered_map<uint32_t, bool> allow_intersection_names;
       language_poly_index language_polys;
 
+      std::multimap<uint32_t, multi_polygon_type> admin_clipped;
+
       if (admin_db_handle) {
         const AABB2<PointLL> tile_bbox = tiling.TileBounds(id);
         admin_polys = GetAdminInfo(admin_db_handle, drive_on_right, allow_intersection_names,
@@ -518,13 +520,15 @@ void BuildTileSet(const std::string& ways_file,
           tile_within_one_admin = true;
         }
 
-        // Simplify poly for faster calculus.
-        const bg::model::box<point_type> bbox{{tile_bbox.minx(), tile_bbox.miny()},
-                                              {tile_bbox.maxx(), tile_bbox.maxy()}};
-        for (auto& [level, poly] : admin_polys) {
+        // Use clipped polygons for faster point-in-polygon lookup during all nodes are within the tile.
+        // A small buffer around is required to cover precision errors.
+        const double eps = 1e-3;
+        const bg::model::box<point_type> bbox{{tile_bbox.minx() - eps, tile_bbox.miny() - eps},
+                                              {tile_bbox.maxx() + eps, tile_bbox.maxy() + eps}};
+        for (const auto& [level, poly] : admin_polys) {
           multi_polygon_type clipped;
           bg::intersection(bbox, poly, clipped);
-          poly = clipped;
+          admin_clipped.emplace(level, clipped);
         }
       }
 
@@ -568,6 +572,21 @@ void BuildTileSet(const std::string& ways_file,
         if (use_admin_db) {
           admin_index = (tile_within_one_admin) ? admin_polys.begin()->first
                                                 : GetMultiPolyId(admin_polys, node_ll, graphtile);
+          const uint32_t clipped_admin_index =
+              (tile_within_one_admin) ? admin_clipped.begin()->first
+                                      : GetMultiPolyId(admin_clipped, node_ll, graphtile);
+
+          if (admin_index != clipped_admin_index) {
+            const AABB2<PointLL> tile_bbox = tiling.TileBounds(id);
+            LOG_WARN("Clipped admin index resolved into something different for " +
+                     std::to_string(node_ll.lat()) + "," + std::to_string(node_ll.lng()) +
+                     " point inside the " + std::to_string(tile_bbox.miny()) + "," +
+                     std::to_string(tile_bbox.minx()) + ";" + std::to_string(tile_bbox.maxy()) + "," +
+                     std::to_string(tile_bbox.maxx()) + " tile. Full resolved into " +
+                     std::to_string(admin_index) + " and clipped into " +
+                     std::to_string(clipped_admin_index));
+          }
+
           dor = drive_on_right[admin_index];
           default_languages = GetMultiPolyIndexes(language_polys, node_ll);
 
