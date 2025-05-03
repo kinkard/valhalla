@@ -1772,11 +1772,11 @@ void GraphEnhancer::Enhance(const boost::property_tree::ptree& pt,
   LOG_DEBUG("Turn Channel Count = " + std::to_string(stats.turnchannelcount));
   LOG_DEBUG("Ramp Count = " + std::to_string(stats.rampcount));
   LOG_DEBUG("Pencil Point Uturn count = " + std::to_string(stats.pencilucount));
-#ifdef LOGGING_LEVEL_DEBUG
+// #ifdef LOGGING_LEVEL_DEBUG
   for (auto density : stats.density_counts) {
-    LOG_DEBUG("Density: " + std::to_string(density));
+    LOG_INFO("Density: " + std::to_string(density));
   }
-#endif
+// #endif
 }
 
 } // namespace mjolnir
