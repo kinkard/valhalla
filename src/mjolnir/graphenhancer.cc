@@ -5,7 +5,6 @@
 #include "mjolnir/util.h"
 #include "speed_assigner.h"
 
-#include <cinttypes>
 #include <future>
 #include <limits>
 #include <list>
@@ -26,8 +25,8 @@
 #include <boost/geometry/geometries/point_xy.hpp>
 #include <boost/geometry/geometries/polygon.hpp>
 #include <boost/geometry/io/wkt/wkt.hpp>
+#include <robin_hood.h>
 
-#include "baldr/datetime.h"
 #include "baldr/graphconstants.h"
 #include "baldr/graphid.h"
 #include "baldr/graphreader.h"
@@ -63,6 +62,29 @@ constexpr uint32_t kMaxNoThruTries = 256;
 constexpr float kDensityRadius = 2.0f;
 constexpr float kDensityRadius2 = kDensityRadius * kDensityRadius;
 constexpr float kDensityLatDeg = (kDensityRadius * kMetersPerKm) / kMetersPerDegreeLat;
+
+// Density grid operates with cell_id derived from coordinate by shifting its bits by (32 -
+// kDensityGridLevel), meaning that higher level produces smaller cells.
+constexpr uint32_t kDensityGridLevel = 16;
+// As two numbers are combined to resolve a cell_id, 16 level is a maximum level that keeps cells
+// globally unique, as higher levels will lead to truncating coordinate higher bits.
+// It is not a problem as density grid covers just slightly beyond a single tile (tile +
+// kDensityRadius in all directions), still it is good to know the tradeoff for having small memory
+// usage with such a small key.
+typedef uint32_t density_grid_key_type;
+
+typedef robin_hood::unordered_flat_map<density_grid_key_type, float> density_grid_type;
+
+constexpr density_grid_key_type LlToDensityCellId(const PointLL& ll) {
+  // Alternatively, ZigZag encoding can be used instead of flat offset
+  uint32_t x = static_cast<uint32_t>((ll.lng() + 180.0) * 1e7);
+  uint32_t y = static_cast<uint32_t>((ll.lat() + 90.0) * 1e7);
+
+  x = x >> (32 - kDensityGridLevel);
+  y = y >> (32 - kDensityGridLevel);
+
+  return (x & 0x00FF) | ((y & 0x00FF) << 16);
+}
 
 // A little struct to hold stats information during each threads work
 struct enhancer_stats {
@@ -807,6 +829,126 @@ bool IsIntersectionInternal(const graph_tile_ptr& start_tile,
 }
 
 /**
+ * Build a density index by accumulating edge lengths in each grid cell and convert
+ * to the relative density values (0-15) used by the enhancer.
+ * This dramatically speeds up density calculations by pre-computing densities.
+ * @param reader        Graph reader
+ * @param lock          Mutex for thread-safe tile access
+ * @param tile          Current tile being processed
+ * @param local_level   Local hierarchy level
+ * @param stats         Reference to stats object to update max_density
+ * @return              Density grid mapping cell IDs to relative density values (0-15)
+ */
+robin_hood::unordered_flat_map<density_grid_key_type, uint32_t>
+BuildDensityIndex(GraphReader& reader,
+                  std::mutex& lock,
+                  const graph_tile_ptr& tile,
+                  const TileLevel& tile_level,
+                  enhancer_stats& stats) {
+  // To properly count density on the tile edges, the bbox should be extended by the density radius,
+  // rounded up to the grid cell size to get fully filled edge cells.
+  const AABB2<PointLL> tile_bbox = tile->BoundingBox();
+  const float density_lng_deg = kDensityLatDeg / cosf(tile_bbox.Center().lat());
+
+  constexpr float cell_size = static_cast<float>(1 << (32 - kDensityGridLevel)) / 1e7;
+
+  const AABB2<PointLL> bbox(tile_bbox.minpt().lng() - (density_lng_deg + cell_size),
+                            tile_bbox.minpt().lat() - (kDensityLatDeg + cell_size),
+                            tile_bbox.maxpt().lng() + (density_lng_deg + cell_size),
+                            tile_bbox.maxpt().lat() + (kDensityLatDeg + cell_size));
+
+  // Grid where each cell contains a sum of lengths of all edges of all nodes within the cell
+  robin_hood::unordered_flat_map<density_grid_key_type, float> density_grid;
+  const size_t x_cells = static_cast<size_t>(floor(bbox.Width() / cell_size)) + 1;
+  const size_t y_cells = static_cast<size_t>(floor(bbox.Height() / cell_size)) + 1;
+  density_grid.reserve(x_cells * y_cells);
+
+  for (const auto& t : tile_level.tiles.TileList(bbox)) {
+    lock.lock();
+    auto newtile = reader.GetGraphTile(GraphId(t, tile_level.level, 0));
+    lock.unlock();
+    if (!newtile || newtile->header()->nodecount() == 0) {
+      continue;
+    }
+
+    const PointLL base_ll = newtile->header()->base_ll();
+    const auto start_node = newtile->node(0);
+    const auto end_node = start_node + newtile->header()->nodecount();
+    for (auto node = start_node; node < end_node; ++node) {
+      // todo: consider separating iteration over the `tile` and neighbor tiles
+      const PointLL node_ll = node->latlng(base_ll);
+      if (!tile_bbox.Contains(node_ll)) {
+        continue;
+      }
+
+      // Get all directed edges and add length
+      float roadlengths = 0.0f;
+      const DirectedEdge* directededge = newtile->directededge(node->edge_index());
+      for (uint32_t i = 0; i < node->edge_count(); i++, directededge++) {
+        // Exclude non-roads (parking, walkways, ferries, construction, etc.)
+        if (directededge->is_road() || directededge->use() == Use::kRamp ||
+            directededge->use() == Use::kTurnChannel || directededge->use() == Use::kAlley ||
+            directededge->use() == Use::kEmergencyAccess) {
+          roadlengths += directededge->length();
+        }
+      }
+
+      density_grid[LlToDensityCellId(node_ll)] += roadlengths;
+    }
+  }
+
+  // Now build density index where each cell contains density value for nodes in that cell.
+  robin_hood::unordered_flat_map<density_grid_key_type, uint32_t> density_index;
+  density_index.reserve(density_grid.size());
+
+  const float cell_size_km = cell_size * kMetersPerDegreeLat / kMetersPerKm;
+  const float cell_area = cell_size_km * cell_size_km * cosf(tile_bbox.Center().lat());
+
+  // Calculate the neighborhood size in cells (how many cells to look in each direction)
+  const int x_neighbors = std::ceil(density_lng_deg / cell_size);
+  const int y_neighbors = std::ceil(kDensityLatDeg / cell_size);
+
+  // For each non-empty cell in our original density
+  for (const auto& [cell_id, _] : density_grid) {
+    float roadlengths = 0.0f;
+    int cell_count = 0;
+
+    // Convert cell_id back to x, y coordinates
+    const int x = cell_id & 0x00FF;
+    const int y = (cell_id >> 16) & 0x00FF;
+
+    for (int nx = -x_neighbors; nx <= x_neighbors; nx++) {
+      for (int ny = -y_neighbors; ny <= y_neighbors; ny++) {
+        // Skip cells that are too far (approximating a circle)
+        if (nx * nx + ny * ny > x_neighbors * y_neighbors) {
+          continue;
+        }
+        cell_count++; // count covered area in cells
+
+        // Calculate neighbor cell ID
+        density_grid_key_type neighbor_id = ((x + nx) & 0x00FF) | (((y + ny) & 0x00FF) << 16);
+        if (auto it = density_grid.find(neighbor_id); it != density_grid.end()) {
+          roadlengths += it->second;
+        }
+      }
+    }
+
+    // Form density measure as km/km^2. Convert roadlengths to km and divide by 2
+    // (since 2 directed edges per edge)
+    float density = (roadlengths * 0.0005f) / (cell_area * cell_count);
+    if (density > stats.max_density) {
+      stats.max_density = density;
+    }
+
+    // Convert to relative density (0-15)
+    const uint32_t relative_value = std::round(density * 0.7f);
+    density_index[cell_id] = std::min(relative_value, 15u);
+  }
+
+  return density_index;
+}
+
+/**
  * Get the road density around the specified lat,lng position. This is a
  * value from 0-15 indicating a relative road density. This can be used
  * in costing methods to help avoid dense, urban areas.
@@ -1348,9 +1490,15 @@ void enhance(const boost::property_tree::ptree& pt,
     uint32_t tl_before = tilebuilder->header()->turnlane_count();
     std::vector<TurnLanes> turn_lanes;
 
+    const PointLL base_ll = tilebuilder->header()->base_ll();
+
+    density_grid_type density_index;
+    density_index.reserve(DensityGridCellsCount(tile->BoundingBox()));
+
     uint32_t id = tile_id.tileid();
     // First pass - update links (set use to ramp or turn channel) and
     // set opposing local index.
+    // Also prebuild the index for density calculation.
     for (uint32_t i = 0; i < tilebuilder->header()->nodecount(); i++) {
       GraphId startnode(id, local_level, i);
       NodeInfo& nodeinfo = tilebuilder->node_builder(i);
@@ -1396,6 +1544,8 @@ void enhance(const boost::property_tree::ptree& pt,
         nodeinfo.set_local_driveability(j, traversability);
       }
 
+      // Length of all edges of this node is used to accumulate density in the current cell.
+      float roadlengths = 0;
       for (uint32_t j = 0; j < nodeinfo.edge_count(); j++) {
         DirectedEdge& directededge = tilebuilder->directededge_builder(nodeinfo.edge_index() + j);
 
@@ -1420,11 +1570,21 @@ void enhance(const boost::property_tree::ptree& pt,
         // Set the opposing index on the local level
         directededge.set_opp_local_idx(
             GetOpposingEdgeIndex(endnodetile, startnode, tile, directededge));
+
+        // Exclude non-roads (parking, walkways, ferries, construction, etc.) for density estimation
+        if (directededge.is_road() || directededge.use() == Use::kRamp ||
+            directededge.use() == Use::kTurnChannel || directededge.use() == Use::kAlley ||
+            directededge.use() == Use::kEmergencyAccess) {
+          roadlengths += directededge.length();
+        }
       }
+
+      density_index[LlToDensityCellId(nodeinfo.latlng(base_ll))] += roadlengths;
     }
 
+    // density_index = AggregateDensityValues(density_index, );
+
     // Second pass - add admin information and edge transition information.
-    PointLL base_ll = tilebuilder->header()->base_ll();
     for (uint32_t i = 0; i < tilebuilder->header()->nodecount(); i++) {
       GraphId startnode(id, local_level, i);
       NodeInfo& nodeinfo = tilebuilder->node_builder(i);
@@ -1433,6 +1593,7 @@ void enhance(const boost::property_tree::ptree& pt,
       uint32_t density = 0;
       if (!use_urban_tag) {
         density = GetDensity(reader, lock, nodeinfo.latlng(base_ll), stats, tiles, local_level);
+        density = density_index[LlToDensityCellId(nodeinfo.latlng(base_ll))];
         nodeinfo.set_density(density);
       }
 
@@ -1772,11 +1933,11 @@ void GraphEnhancer::Enhance(const boost::property_tree::ptree& pt,
   LOG_DEBUG("Turn Channel Count = " + std::to_string(stats.turnchannelcount));
   LOG_DEBUG("Ramp Count = " + std::to_string(stats.rampcount));
   LOG_DEBUG("Pencil Point Uturn count = " + std::to_string(stats.pencilucount));
-// #ifdef LOGGING_LEVEL_DEBUG
+  // #ifdef LOGGING_LEVEL_DEBUG
   for (auto density : stats.density_counts) {
     LOG_INFO("Density: " + std::to_string(density));
   }
-// #endif
+  // #endif
 }
 
 } // namespace mjolnir
