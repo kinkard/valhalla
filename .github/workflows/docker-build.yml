@@ -2,7 +2,7 @@ name: Publish Docker image
 on:
   push:
     branches:
-      - "master"
+      - "image"
     tags:
       - "*"
     paths-ignore:
@@ -23,7 +23,7 @@ jobs:
     outputs:
       tag: ${{ steps.extract_tag.outputs.tag }}
 
-    if: ${{ github.repository_owner == 'valhalla' }}
+    if: ${{ github.repository_owner == 'kinkard' }}
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -39,7 +39,7 @@ jobs:
         id: extract_tag
 
       - name: Get version modifier
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/image'
         run: echo "version_modifier=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
         id: extract_gitsha
 
@@ -54,14 +54,14 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push latest
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/image'
         uses: docker/build-push-action@v6
         with:
           context: .
           provenance: false # needed to be able to converge into one image
           platforms: ${{ matrix.platform }}
           push: true
-          tags: ghcr.io/valhalla/valhalla:latest-${{ matrix.tagsuffix }}
+          tags: ghcr.io/kinkard/valhalla:latest-${{ matrix.tagsuffix }}
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
           build-args: |
@@ -75,7 +75,7 @@ jobs:
           provenance: false # needed to be able to converge into one image
           platforms: ${{ matrix.platform }}
           push: true
-          tags: ghcr.io/valhalla/valhalla:${{ steps.extract_tag.outputs.tag }}-${{ matrix.tagsuffix }}
+          tags: ghcr.io/kinkard/valhalla:${{ steps.extract_tag.outputs.tag }}-${{ matrix.tagsuffix }}
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
 
@@ -94,16 +94,16 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           docker manifest create \
-            ghcr.io/valhalla/valhalla:${{ needs.build_and_publish.outputs.tag }} \
-            --amend ghcr.io/valhalla/valhalla:${{ needs.build_and_publish.outputs.tag }}-amd64 \
-            --amend ghcr.io/valhalla/valhalla:${{ needs.build_and_publish.outputs.tag }}-arm64 
-          docker manifest push ghcr.io/valhalla/valhalla:${{ needs.build_and_publish.outputs.tag }}
+            ghcr.io/kinkard/valhalla:${{ needs.build_and_publish.outputs.tag }} \
+            --amend ghcr.io/kinkard/valhalla:${{ needs.build_and_publish.outputs.tag }}-amd64 \
+            --amend ghcr.io/kinkard/valhalla:${{ needs.build_and_publish.outputs.tag }}-arm64
+          docker manifest push ghcr.io/kinkard/valhalla:${{ needs.build_and_publish.outputs.tag }}
 
       - name: Create and push latest manifest
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/image'
         run: |
           docker manifest create \
-            ghcr.io/valhalla/valhalla:latest \
-            --amend ghcr.io/valhalla/valhalla:latest-amd64 \
-            --amend ghcr.io/valhalla/valhalla:latest-arm64 
-          docker manifest push ghcr.io/valhalla/valhalla:latest
+            ghcr.io/kinkard/valhalla:latest \
+            --amend ghcr.io/kinkard/valhalla:latest-amd64 \
+            --amend ghcr.io/kinkard/valhalla:latest-arm64
+          docker manifest push ghcr.io/kinkard/valhalla:latest
