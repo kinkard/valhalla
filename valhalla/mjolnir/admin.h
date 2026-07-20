@@ -55,12 +55,29 @@ struct Geometry {
 typedef std::vector<std::tuple<Geometry, std::vector<std::string>, bool>> language_poly_index;
 
 class AdminDB {
+  // A parsed geometry cached across the tiles, prepared for fast intersection tests
+  struct CachedGeometry {
+    GEOSGeom_t* geometry;
+    const GEOSPrepGeom_t* prepared;
+  };
+
   Sqlite3 db;
   geos_context_type geos_context;
   GEOSWKBReader_t* wkb_reader;
 
+  // Parsed geometries of the admins and tz_world tables, keyed by table rowid. Tiles in the
+  // same region intersect the same polygons, so caching parsed geometries across the tiles
+  // avoids re-reading and re-parsing them for every tile
+  std::unordered_map<int64_t, CachedGeometry> admin_geometries_;
+  std::unordered_map<int64_t, CachedGeometry> tz_geometries_;
+  size_t cached_coordinates_ = 0;
+
   // Constructor is private, use `AdminDB::open()` instead.
   AdminDB(Sqlite3&& db);
+
+  const CachedGeometry*
+  get_geometry(std::unordered_map<int64_t, CachedGeometry>& cache, const char* table, int64_t rowid);
+  void clear_geometry_cache();
 
 public:
   // Tries to open an AdminDB from the given path. Returns std::nullopt if failed.
@@ -72,8 +89,12 @@ public:
   AdminDB& operator=(AdminDB const&) = delete;
   AdminDB(AdminDB&& other) noexcept
       : db(std::move(other.db)), geos_context(std::move(other.geos_context)),
-        wkb_reader(other.wkb_reader) {
+        wkb_reader(other.wkb_reader), admin_geometries_(std::move(other.admin_geometries_)),
+        tz_geometries_(std::move(other.tz_geometries_)),
+        cached_coordinates_(other.cached_coordinates_) {
     other.wkb_reader = nullptr;
+    other.admin_geometries_.clear();
+    other.tz_geometries_.clear();
   }
   AdminDB& operator=(AdminDB&& other) noexcept {
     // move and swap idiom via local variable
@@ -81,6 +102,9 @@ public:
     std::swap(db, local.db);
     std::swap(geos_context, local.geos_context);
     std::swap(wkb_reader, local.wkb_reader);
+    std::swap(admin_geometries_, local.admin_geometries_);
+    std::swap(tz_geometries_, local.tz_geometries_);
+    std::swap(cached_coordinates_, local.cached_coordinates_);
     return *this;
   }
 
@@ -88,12 +112,17 @@ public:
     return db.get();
   }
 
-  // Reads a WKB blob and clips it to the given bounding box.
-  // These two operations are combined into a single function to simplify amount of abstractions
-  // and leave `Geometry` always deal with GEOSPreparedGeometry without intermediate entity.
-  Geometry read_wkb_and_clip(const unsigned char* wkb_blob,
-                             int wkb_size,
-                             const midgard::AABB2<midgard::PointLL>& bbox);
+  // Return the parsed geometry of an admins/tz_world table row, reading and parsing the blob
+  // only when it is not cached yet. May return nullptr if the row has no geometry. The pointer
+  // is only valid until the next call as the cache is cleared when it grows too large.
+  const CachedGeometry* get_admin_geometry(int64_t rowid);
+  const CachedGeometry* get_tz_geometry(int64_t rowid);
+
+  // Same test ST_Intersects(geom, BuildMBR(bbox)) does, on the cached geometry
+  bool intersects_bbox(const CachedGeometry& geom, const midgard::AABB2<midgard::PointLL>& bbox);
+
+  // Clips the cached geometry to the given bounding box.
+  Geometry clip(const CachedGeometry& geom, const midgard::AABB2<midgard::PointLL>& bbox);
 };
 
 /**

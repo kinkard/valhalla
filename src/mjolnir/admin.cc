@@ -19,6 +19,26 @@ namespace {
 // geometry is clipped, a small buffer around should be added to handle edge cases.
 constexpr double kTileBboxBuffer = 1e-3;
 
+// Coordinate budget for the parsed geometries cached in AdminDB, roughly 256 MiB with the
+// spatial indexes the prepared geometries hold. The cache is dropped when it grows above.
+constexpr size_t kMaxCachedCoordinates = 8 * 1024 * 1024;
+
+// Builds a rectangle geometry of the bounding box
+GEOSGeometry* make_bbox_geometry(GEOSContextHandle_t ctx, const AABB2<PointLL>& bbox) {
+  GEOSCoordSequence* coords = GEOSCoordSeq_create_r(ctx, 5, 2);
+  auto set_point = [&](unsigned int idx, double x, double y) {
+    GEOSCoordSeq_setX_r(ctx, coords, idx, x);
+    GEOSCoordSeq_setY_r(ctx, coords, idx, y);
+  };
+  set_point(0, bbox.minx(), bbox.miny());
+  set_point(1, bbox.maxx(), bbox.miny());
+  set_point(2, bbox.maxx(), bbox.maxy());
+  set_point(3, bbox.minx(), bbox.maxy());
+  set_point(4, bbox.minx(), bbox.miny());
+  GEOSGeometry* ring = GEOSGeom_createLinearRing_r(ctx, coords);
+  return GEOSGeom_createPolygon_r(ctx, ring, nullptr, 0);
+}
+
 } // namespace
 
 Geometry::Geometry(geos_context_type ctx, GEOSGeometry* geom)
@@ -52,7 +72,10 @@ AdminDB::AdminDB(Sqlite3&& sqlite3)
 }
 
 AdminDB::~AdminDB() {
-  GEOSWKBReader_destroy_r(geos_context.get(), wkb_reader);
+  if (wkb_reader) {
+    clear_geometry_cache();
+    GEOSWKBReader_destroy_r(geos_context.get(), wkb_reader);
+  }
 }
 
 std::optional<AdminDB> AdminDB::open(const std::string& path) {
@@ -63,12 +86,75 @@ std::optional<AdminDB> AdminDB::open(const std::string& path) {
   return {};
 }
 
-Geometry
-AdminDB::read_wkb_and_clip(const unsigned char* wkb_blob, int wkb_size, const AABB2<PointLL>& bbox) {
-  GEOSGeometry* geom = GEOSWKBReader_read_r(geos_context.get(), wkb_reader, wkb_blob, wkb_size);
-  GEOSGeometry* clipped =
-      GEOSClipByRect_r(geos_context.get(), geom, bbox.minx(), bbox.miny(), bbox.maxx(), bbox.maxy());
-  GEOSGeom_destroy_r(geos_context.get(), geom);
+void AdminDB::clear_geometry_cache() {
+  for (auto* cache : {&admin_geometries_, &tz_geometries_}) {
+    for (auto& geom : *cache) {
+      GEOSPreparedGeom_destroy_r(geos_context.get(), geom.second.prepared);
+      GEOSGeom_destroy_r(geos_context.get(), geom.second.geometry);
+    }
+    cache->clear();
+  }
+  cached_coordinates_ = 0;
+}
+
+const AdminDB::CachedGeometry*
+AdminDB::get_geometry(std::unordered_map<int64_t, CachedGeometry>& cache,
+                      const char* table,
+                      int64_t rowid) {
+  auto found = cache.find(rowid);
+  if (found != cache.end()) {
+    return found->second.geometry ? &found->second : nullptr;
+  }
+
+  // Read and parse the geometry blob of the row
+  GEOSGeometry* geom = nullptr;
+  std::string sql = std::string("SELECT ST_AsBinary(geom) FROM ") + table + " WHERE rowid=?1";
+  sqlite3_stmt* stmt = nullptr;
+  if (sqlite3_prepare_v2(db.get(), sql.c_str(), sql.length(), &stmt, 0) == SQLITE_OK) {
+    sqlite3_bind_int64(stmt, 1, rowid);
+    if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_type(stmt, 0) == SQLITE_BLOB) {
+      const auto* wkb_blob = static_cast<const unsigned char*>(sqlite3_column_blob(stmt, 0));
+      int wkb_size = sqlite3_column_bytes(stmt, 0);
+      geom = GEOSWKBReader_read_r(geos_context.get(), wkb_reader, wkb_blob, wkb_size);
+    }
+  }
+  if (stmt) {
+    sqlite3_finalize(stmt);
+  }
+  if (geom == nullptr) {
+    cache.emplace(rowid, CachedGeometry{nullptr, nullptr});
+    return nullptr;
+  }
+
+  int coordinates = GEOSGetNumCoordinates_r(geos_context.get(), geom);
+  cached_coordinates_ += std::max(coordinates, 0);
+  if (cached_coordinates_ > kMaxCachedCoordinates) {
+    clear_geometry_cache();
+    cached_coordinates_ = std::max(coordinates, 0);
+  }
+
+  const GEOSPreparedGeometry* prepared = GEOSPrepare_r(geos_context.get(), geom);
+  return &cache.emplace(rowid, CachedGeometry{geom, prepared}).first->second;
+}
+
+const AdminDB::CachedGeometry* AdminDB::get_admin_geometry(int64_t rowid) {
+  return get_geometry(admin_geometries_, "admins", rowid);
+}
+
+const AdminDB::CachedGeometry* AdminDB::get_tz_geometry(int64_t rowid) {
+  return get_geometry(tz_geometries_, "tz_world", rowid);
+}
+
+bool AdminDB::intersects_bbox(const CachedGeometry& geom, const AABB2<PointLL>& bbox) {
+  GEOSGeometry* bbox_geom = make_bbox_geometry(geos_context.get(), bbox);
+  bool intersects = GEOSPreparedIntersects_r(geos_context.get(), geom.prepared, bbox_geom);
+  GEOSGeom_destroy_r(geos_context.get(), bbox_geom);
+  return intersects;
+}
+
+Geometry AdminDB::clip(const CachedGeometry& geom, const AABB2<PointLL>& bbox) {
+  GEOSGeometry* clipped = GEOSClipByRect_r(geos_context.get(), geom.geometry, bbox.minx(),
+                                           bbox.miny(), bbox.maxx(), bbox.maxy());
   return Geometry(geos_context, clipped);
 }
 
@@ -147,11 +233,8 @@ std::multimap<uint32_t, Geometry> GetTimeZones(AdminDB& db, const AABB2<PointLL>
   uint32_t ret;
   uint32_t result = 0;
 
-  std::string sql = "select TZID, ST_AsBinary(geom) as geom_text from tz_world where ";
-  sql += "ST_Intersects(geom, BuildMBR(" + std::to_string(bbox.minx()) + ",";
-  sql += std::to_string(bbox.miny()) + ", " + std::to_string(bbox.maxx()) + ",";
-  sql += std::to_string(bbox.maxy()) + ")) ";
-  sql += "and rowid IN (SELECT rowid FROM SpatialIndex WHERE f_table_name = ";
+  std::string sql = "select TZID, rowid from tz_world where ";
+  sql += "rowid IN (SELECT rowid FROM SpatialIndex WHERE f_table_name = ";
   sql += "'tz_world' AND search_frame = BuildMBR(" + std::to_string(bbox.minx()) + ",";
   sql += std::to_string(bbox.miny()) + ", " + std::to_string(bbox.maxx()) + ",";
   sql += std::to_string(bbox.maxy()) + "));";
@@ -163,16 +246,10 @@ std::multimap<uint32_t, Geometry> GetTimeZones(AdminDB& db, const AABB2<PointLL>
 
     while (result == SQLITE_ROW) {
       std::string tz_id;
-      const unsigned char* wkb_blob = nullptr;
-      int wkb_size = 0;
-
       if (sqlite3_column_type(stmt, 0) == SQLITE_TEXT) {
         tz_id = (char*)sqlite3_column_text(stmt, 0);
       }
-      if (sqlite3_column_type(stmt, 1) == SQLITE_BLOB) {
-        wkb_blob = static_cast<const unsigned char*>(sqlite3_column_blob(stmt, 1));
-        wkb_size = sqlite3_column_bytes(stmt, 1);
-      }
+      int64_t rowid = sqlite3_column_int64(stmt, 1);
 
       uint32_t idx = DateTime::get_tz_db().to_index(tz_id);
       if (idx == 0) {
@@ -180,8 +257,11 @@ std::multimap<uint32_t, Geometry> GetTimeZones(AdminDB& db, const AABB2<PointLL>
         throw std::runtime_error("Can't find timezone ID " + std::string(tz_id));
       }
 
-      auto geom = db.read_wkb_and_clip(wkb_blob, wkb_size, bbox);
-      polys.emplace(idx, std::move(geom));
+      // The spatial index only matched bounding boxes, check the real geometry
+      const auto* geom = db.get_tz_geometry(rowid);
+      if (geom != nullptr && db.intersects_bbox(*geom, bbox)) {
+        polys.emplace(idx, db.clip(*geom, bbox));
+      }
       result = sqlite3_step(stmt);
     }
   }
@@ -271,16 +351,18 @@ void GetData(AdminDB& db,
         default_language = (char*)sqlite3_column_text(stmt, 8);
       }
 
-      const unsigned char* wkb_blob = nullptr;
-      int wkb_size = 0;
-      if (sqlite3_column_type(stmt, 9) == SQLITE_BLOB) {
-        wkb_blob = static_cast<const unsigned char*>(sqlite3_column_blob(stmt, 9));
-        wkb_size = sqlite3_column_bytes(stmt, 9);
+      int64_t rowid = sqlite3_column_int64(stmt, 9);
+
+      // The spatial index only matched bounding boxes, check the real geometry
+      const auto* cached_geom = db.get_admin_geometry(rowid);
+      if (cached_geom == nullptr || !db.intersects_bbox(*cached_geom, bbox)) {
+        result = sqlite3_step(stmt);
+        continue;
       }
 
       uint32_t index = tilebuilder.AddAdmin(country_name, state_name, country_iso, state_iso);
 
-      auto geom = db.read_wkb_and_clip(wkb_blob, wkb_size, bbox);
+      auto geom = db.clip(*cached_geom, bbox);
 
       if (!default_language.empty()) {
         auto langs = ParseLanguageTokens(default_language);
@@ -307,14 +389,16 @@ void GetData(AdminDB& db,
         default_language = (char*)sqlite3_column_text(stmt, 2);
       }
 
-      const unsigned char* wkb_blob = nullptr;
-      int wkb_size = 0;
-      if (sqlite3_column_type(stmt, 3) == SQLITE_BLOB) {
-        wkb_blob = static_cast<const unsigned char*>(sqlite3_column_blob(stmt, 3));
-        wkb_size = sqlite3_column_bytes(stmt, 3);
+      int64_t rowid = sqlite3_column_int64(stmt, 3);
+
+      // The spatial index only matched bounding boxes, check the real geometry
+      const auto* cached_geom = db.get_admin_geometry(rowid);
+      if (cached_geom == nullptr || !db.intersects_bbox(*cached_geom, bbox)) {
+        result = sqlite3_step(stmt);
+        continue;
       }
 
-      auto geom = db.read_wkb_and_clip(wkb_blob, wkb_size, bbox);
+      auto geom = db.clip(*cached_geom, bbox);
 
       if (!default_language.empty()) {
         auto langs = ParseLanguageTokens(default_language);
@@ -350,13 +434,9 @@ GetAdminInfo(AdminDB& db,
   sqlite3_stmt* stmt = 0;
 
   // default language query
-  std::string sql =
-      "SELECT admin_level, supported_languages, default_language, ST_AsBinary(geom) from ";
-  sql +=
-      " admins where (supported_languages is NOT NULL or default_language is NOT NULL) and ST_Intersects(geom, BuildMBR(" +
-      std::to_string(bbox.minx()) + ",";
-  sql += std::to_string(bbox.miny()) + ", " + std::to_string(bbox.maxx()) + ",";
-  sql += std::to_string(bbox.maxy()) + ")) and admin_level>4 ";
+  std::string sql = "SELECT admin_level, supported_languages, default_language, rowid from ";
+  sql += " admins where (supported_languages is NOT NULL or default_language is NOT NULL) ";
+  sql += "and admin_level>4 ";
   sql += "and rowid IN (SELECT rowid FROM SpatialIndex WHERE f_table_name = ";
   sql += "'admins' AND search_frame = BuildMBR(" + std::to_string(bbox.minx()) + ",";
   sql += std::to_string(bbox.miny()) + ", " + std::to_string(bbox.maxx()) + ",";
@@ -367,11 +447,8 @@ GetAdminInfo(AdminDB& db,
   // state query
   sql = "SELECT country.name, state.name, country.iso_code, ";
   sql += "state.iso_code, state.drive_on_right, state.allow_intersection_names, state.admin_level, ";
-  sql +=
-      "state.supported_languages, state.default_language, ST_AsBinary(state.geom) from admins state, admins country where ";
-  sql += "ST_Intersects(state.geom, BuildMBR(" + std::to_string(bbox.minx()) + ",";
-  sql += std::to_string(bbox.miny()) + ", " + std::to_string(bbox.maxx()) + ",";
-  sql += std::to_string(bbox.maxy()) + ")) and ";
+  sql += "state.supported_languages, state.default_language, state.rowid ";
+  sql += "from admins state, admins country where ";
   sql += "country.rowid = state.parent_admin and state.admin_level=4 ";
   sql += "and state.rowid IN (SELECT rowid FROM SpatialIndex WHERE f_table_name = ";
   sql += "'admins' AND search_frame = BuildMBR(" + std::to_string(bbox.minx()) + ",";
@@ -382,11 +459,7 @@ GetAdminInfo(AdminDB& db,
 
   // country query
   sql = "SELECT name, \"\", iso_code, \"\", drive_on_right, allow_intersection_names, admin_level, ";
-  sql +=
-      "supported_languages, default_language, ST_AsBinary(geom) from  admins where ST_Intersects(geom, BuildMBR(" +
-      std::to_string(bbox.minx()) + ",";
-  sql += std::to_string(bbox.miny()) + ", " + std::to_string(bbox.maxx()) + ",";
-  sql += std::to_string(bbox.maxy()) + ")) and admin_level=2 ";
+  sql += "supported_languages, default_language, rowid from admins where admin_level=2 ";
   sql += "and rowid IN (SELECT rowid FROM SpatialIndex WHERE f_table_name = ";
   sql += "'admins' AND search_frame = BuildMBR(" + std::to_string(bbox.minx()) + ",";
   sql += std::to_string(bbox.miny()) + ", " + std::to_string(bbox.maxx()) + ",";
