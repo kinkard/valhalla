@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -13,6 +14,7 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -324,7 +326,8 @@ public:
   // These should all fit in memory. Then, merge the sub-ranges into the
   // output sequence via priority queue.
   void sort(const std::function<bool(const T&, const T&)>& predicate,
-            size_t buffer_size = 1024 * 1024 * 512 / sizeof(T)) {
+            size_t buffer_size = 1024 * 1024 * 512 / sizeof(T),
+            uint32_t concurrency = std::thread::hardware_concurrency()) {
     flush();
     // if no elements we are done
     if (memmap.size() == 0) {
@@ -335,6 +338,27 @@ public:
     if (buffer_size > memmap.size() + write_buffer.size()) {
       std::sort(static_cast<T*>(memmap), static_cast<T*>(memmap) + memmap.size(), predicate);
       return;
+    }
+
+    // Sort the subsections in parallel, they are disjoint so no locking is needed
+    const size_t chunk_count = 1 + (memmap.size() - 1) / buffer_size;
+    {
+      std::atomic<size_t> next_chunk(0);
+      std::vector<std::thread> threads(
+          std::min(static_cast<size_t>(std::max(concurrency, 1u)), chunk_count));
+      for (auto& thread : threads) {
+        thread = std::thread([this, &predicate, buffer_size, &next_chunk, chunk_count]() {
+          for (size_t chunk = next_chunk++; chunk < chunk_count; chunk = next_chunk++) {
+            size_t begin = chunk * buffer_size;
+            std::sort(static_cast<T*>(memmap) + begin,
+                      static_cast<T*>(memmap) + std::min(memmap.size(), begin + buffer_size),
+                      predicate);
+          }
+        });
+      }
+      for (auto& thread : threads) {
+        thread.join();
+      }
     }
 
     auto tmp_path = std::filesystem::path(file_name).replace_filename(
@@ -351,10 +375,8 @@ public:
       std::priority_queue<std::pair<T, size_t>, std::vector<std::pair<T, size_t>>, decltype(cmp)> pq(
           cmp);
 
-      // Sort the subsections
+      // Seed the queue with the head of each sorted subsection
       for (size_t i = 0; i < memmap.size(); i += buffer_size) {
-        std::sort(static_cast<T*>(memmap) + i,
-                  static_cast<T*>(memmap) + std::min(memmap.size(), i + buffer_size), predicate);
         pq.emplace(*at(i), i);
       }
 
