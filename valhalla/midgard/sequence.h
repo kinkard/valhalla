@@ -364,33 +364,91 @@ public:
     auto tmp_path = std::filesystem::path(file_name).replace_filename(
         std::filesystem::path(file_name).filename().string() + ".tmp");
     {
-      // we need a temporary sequence to merge the sorted subsections into
-      sequence<T> output_seq(tmp_path.string(), true);
+      // Chunks are partitioned by value so that every partition can be merged and written
+      // to its exact output range concurrently
+      const T* data = static_cast<const T*>(memmap);
+      const size_t partition_count = std::max(concurrency, 1u);
 
-      // Comparator needs to be inverted for pq to provide constant time *smallest* lookup
-      // Pq keeps track of element and its index.
-      auto cmp = [&predicate](const std::pair<T, size_t>& a, std::pair<T, size_t>& b) {
-        return predicate(b.first, a.first);
-      };
-      std::priority_queue<std::pair<T, size_t>, std::vector<std::pair<T, size_t>>, decltype(cmp)> pq(
-          cmp);
-
-      // Seed the queue with the head of each sorted subsection
-      for (size_t i = 0; i < memmap.size(); i += buffer_size) {
-        pq.emplace(*at(i), i);
-      }
-
-      // Perform the merge
-      while (!pq.empty()) {
-        auto tmp = pq.top();
-        pq.pop();
-        output_seq.push_back(tmp.first);
-        size_t new_idx = tmp.second + 1;
-        if (new_idx % buffer_size != 0 && new_idx < memmap.size()) {
-          pq.emplace(*at(new_idx), new_idx);
+      // Sample every chunk at the partition quantiles and take the quantiles of all the
+      // samples as the values that split the output between the partitions
+      std::vector<T> samples;
+      samples.reserve(chunk_count * (partition_count - 1));
+      for (size_t chunk = 0; chunk < chunk_count; ++chunk) {
+        const size_t begin = chunk * buffer_size;
+        const size_t len = std::min(memmap.size(), begin + buffer_size) - begin;
+        for (size_t k = 1; k < partition_count; ++k) {
+          samples.push_back(data[begin + k * len / partition_count]);
         }
       }
-      output_seq.flush();
+      std::sort(samples.begin(), samples.end(), predicate);
+
+      // Partition boundaries within each chunk, found by binary search of the splitters.
+      // boundaries[chunk] holds partition_count + 1 indexes into the file
+      std::vector<std::vector<size_t>> boundaries(chunk_count);
+      for (size_t chunk = 0; chunk < chunk_count; ++chunk) {
+        const size_t begin = chunk * buffer_size;
+        const size_t end = std::min(memmap.size(), begin + buffer_size);
+        auto& bounds = boundaries[chunk];
+        bounds.reserve(partition_count + 1);
+        bounds.push_back(begin);
+        for (size_t k = 1; k < partition_count; ++k) {
+          const T& splitter = samples[k * samples.size() / partition_count];
+          bounds.push_back(std::lower_bound(data + begin, data + end, splitter, predicate) - data);
+        }
+        bounds.push_back(end);
+      }
+
+      // Exact start of each partition in the output
+      std::vector<size_t> output_offsets(partition_count, 0);
+      for (size_t k = 1; k < partition_count; ++k) {
+        output_offsets[k] = output_offsets[k - 1];
+        for (size_t chunk = 0; chunk < chunk_count; ++chunk) {
+          output_offsets[k] += boundaries[chunk][k] - boundaries[chunk][k - 1];
+        }
+      }
+
+      // The temporary file the merged output is written into, mapped at full size upfront
+      mem_map<T> output;
+      output.create(tmp_path.string(), memmap.size());
+
+      // Merge one partition of every chunk via priority queue, as the subsections are
+      // disjoint by value no locking is needed
+      auto merge_partition = [&](size_t k) {
+        // Comparator needs to be inverted for pq to provide constant time *smallest* lookup
+        // Pq keeps track of element and its chunk.
+        auto cmp = [&predicate](const std::pair<T, size_t>& a, const std::pair<T, size_t>& b) {
+          return predicate(b.first, a.first);
+        };
+        std::priority_queue<std::pair<T, size_t>, std::vector<std::pair<T, size_t>>, decltype(cmp)>
+            pq(cmp);
+
+        std::vector<size_t> cursors(chunk_count);
+        for (size_t chunk = 0; chunk < chunk_count; ++chunk) {
+          cursors[chunk] = boundaries[chunk][k];
+          if (cursors[chunk] < boundaries[chunk][k + 1]) {
+            pq.emplace(data[cursors[chunk]], chunk);
+          }
+        }
+
+        T* out = static_cast<T*>(output) + output_offsets[k];
+        while (!pq.empty()) {
+          auto top = pq.top();
+          pq.pop();
+          *out++ = top.first;
+          size_t chunk = top.second;
+          if (++cursors[chunk] < boundaries[chunk][k + 1]) {
+            pq.emplace(data[cursors[chunk]], chunk);
+          }
+        }
+      };
+
+      std::vector<std::thread> threads(partition_count);
+      for (size_t k = 0; k < partition_count; ++k) {
+        threads[k] = std::thread(merge_partition, k);
+      }
+      for (auto& thread : threads) {
+        thread.join();
+      }
     }
 
     // Forget about this file for a second so we can swap in the temp file
