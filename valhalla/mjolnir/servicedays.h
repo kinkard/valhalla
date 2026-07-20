@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace valhalla {
@@ -73,7 +74,7 @@ uint64_t shift_service_day(const uint64_t& days);
  */
 baldr::MONTH get_month(const std::string& month);
 
-std::vector<uint64_t> get_time_range(const std::string& condition);
+std::vector<uint64_t> get_time_range(std::string_view condition);
 
 } // namespace mjolnir
 } // namespace valhalla

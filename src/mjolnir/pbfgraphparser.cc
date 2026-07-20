@@ -11,6 +11,7 @@
 #include "mjolnir/osmnodelinguistic.h"
 #include "mjolnir/osmway.h"
 #include "mjolnir/timeparsing.h"
+#include "mjolnir/tokenizer.h"
 #include "mjolnir/util.h"
 #include "proto/common.pb.h"
 #include "scoped_timer.h"
@@ -998,8 +999,7 @@ struct graph_parser {
         }
       }
 
-      std::vector<std::string> conditions = GetTagTokens(tokens.at(1), ';');
-      for (const auto& c : conditions) {
+      for (std::string_view c : Tokenizer(tokens.at(1), ';')) {
         std::vector<uint64_t> values = get_time_range(c);
         for (const auto& v : values) {
           ConditionalSpeedLimit limit = {};
@@ -2672,9 +2672,7 @@ struct graph_parser {
           }
           std::string tmp = tokens.at(1);
           boost::algorithm::trim(tmp);
-          std::vector<std::string> conditions = GetTagTokens(tmp, ';');
-
-          for (const auto& condition : conditions) {
+          for (std::string_view condition : Tokenizer(tmp, ';')) {
             std::vector<uint64_t> values = get_time_range(condition);
 
             for (const auto& v : values) {
@@ -2904,12 +2902,12 @@ struct graph_parser {
     // add int_refs to the end of the refs for now.  makes sure that we don't add dups.
     if (!int_ref_.empty()) {
       std::string tmp = ref_;
+      // rs must be a materialized snapshot, tmp is appended to below
       std::vector<std::string> rs = GetTagTokens(tmp);
-      std::vector<std::string> is = GetTagTokens(int_ref_);
       bool bFound = false;
 
-      for (auto& i : is) {
-        for (auto& r : rs) {
+      for (std::string_view i : Tokenizer(int_ref_, ';')) {
+        for (const auto& r : rs) {
           if (i == r) {
             bFound = true;
             break;
@@ -3110,14 +3108,12 @@ struct graph_parser {
 
     // Delete the name from from name field if it exists in the ref.
     if (!name_.empty() && !ref_.empty()) {
-      std::vector<std::string> names = GetTagTokens(name_);
-      std::vector<std::string> refs = GetTagTokens(ref_);
       bool bFound = false;
 
       std::string tmp;
 
-      for (auto& name : names) {
-        for (auto& ref : refs) {
+      for (std::string_view name : Tokenizer(name_, ';')) {
+        for (std::string_view ref : Tokenizer(ref_, ';')) {
           if (name == ref) {
             bFound = true;
             break;
@@ -3139,7 +3135,7 @@ struct graph_parser {
 
     // edge case.  name = name:<lg> and we contain a -  or /
     // see https://www.openstreetmap.org/way/816515178#map=16/42.7888/-1.6391
-    if (name_ == name_w_lang_ && !name_.empty() && GetTagTokens(language_).size() == 1) {
+    if (name_ == name_w_lang_ && !name_.empty() && language_.find(';') == std::string::npos) {
       bool process = false;
       std::vector<std::string> names;
 
@@ -3884,9 +3880,11 @@ struct graph_parser {
         condition = tag.second;
       } else if (tag.first == "restriction:probable") {
         // probability=73
-        std::vector<std::string> prob_tok = GetTagTokens(tag.second, '=');
-        if (prob_tok.size() == 2) {
-          const auto& p = to_int(prob_tok.at(1));
+        Tokenizer prob_tok(tag.second, '=');
+        if (prob_tok.count() == 2) {
+          auto value = prob_tok.begin();
+          ++value;
+          const auto p = to_int(*value);
           if (p > 0) {
             isProbable = true;
             restriction.set_probability(p);
@@ -4167,8 +4165,7 @@ struct graph_parser {
           modes = (kAutoAccess | kMopedAccess | kTaxiAccess | kBusAccess | kBicycleAccess |
                    kTruckAccess | kEmergencyAccess | kMotorcycleAccess);
           // remove access as the restriction does not apply to these modes.
-          std::vector<std::string> tokens = GetTagTokens(except);
-          for (const auto& t : tokens) {
+          for (std::string_view t : Tokenizer(except, ';')) {
             if (t == "motorcar") {
               modes = modes & ~(kAutoAccess | kMopedAccess);
             } else if (t == "motorcycle") {
@@ -4538,10 +4535,11 @@ struct graph_parser {
       t.pop_back();
     }
 
-    std::vector<std::string> tokens = GetTagTokens(t, ':');
-    if (tokens.size() == 2) {
-
-      const std::string& lang = tokens.at(1);
+    Tokenizer name_lang(t, ':');
+    if (name_lang.count() == 2) {
+      auto value = name_lang.begin();
+      ++value;
+      const std::string lang(*value); // copy: t is reassigned below
       if (stringLanguage(lang) != Language::kNone &&
           !tag.second.empty()) // name:en, name:ar, name:fr, etc
       {
@@ -4778,19 +4776,22 @@ struct graph_parser {
       else
         ref_ = ref;
     } else {
-      std::vector<std::string> refs = GetTagTokens(ref);
-      std::vector<std::string> directions = GetTagTokens(direction);
+      Tokenizer refs(ref, ';');
+      Tokenizer directions(direction, ';');
 
       std::string tmp_ref;
-      if (refs.size() == directions.size()) {
-        for (uint32_t i = 0; i < refs.size(); i++) {
+      if (refs.count() == directions.count()) {
+        auto dir = directions.begin();
+        for (std::string_view r : refs) {
+          std::string_view d = *dir++;
           if (!tmp_ref.empty()) {
             tmp_ref += ";";
           }
-          if (!directions.at(i).empty())
-            tmp_ref += refs.at(i) + " " + directions.at(i);
-          else
-            tmp_ref += refs.at(i);
+          tmp_ref += r;
+          if (!d.empty()) {
+            tmp_ref += " ";
+            tmp_ref += d;
+          }
         }
         if (int_ref)
           int_ref_ = tmp_ref;
@@ -4855,19 +4856,22 @@ struct graph_parser {
     if (direction_pronunciation.empty()) {
       UpdateRefPronunciation(ref_pronunciation, type, int_ref);
     } else {
-      std::vector<std::string> refs = GetTagTokens(ref_pronunciation);
-      std::vector<std::string> directions = GetTagTokens(direction_pronunciation);
+      Tokenizer refs(ref_pronunciation, ';');
+      Tokenizer directions(direction_pronunciation, ';');
 
       std::string tmp_ref;
-      if (refs.size() == directions.size()) {
-        for (uint32_t i = 0; i < refs.size(); i++) {
+      if (refs.count() == directions.count()) {
+        auto dir = directions.begin();
+        for (std::string_view r : refs) {
+          std::string_view d = *dir++;
           if (!tmp_ref.empty()) {
             tmp_ref += ";";
           }
-          if (!directions.at(i).empty())
-            tmp_ref += refs.at(i) + " " + directions.at(i);
-          else
-            tmp_ref += refs.at(i);
+          tmp_ref += r;
+          if (!d.empty()) {
+            tmp_ref += " ";
+            tmp_ref += d;
+          }
         }
         UpdateRefPronunciation(tmp_ref, type, int_ref);
       } else
@@ -4907,12 +4911,12 @@ struct graph_parser {
       tmp = (index ? osmdata_.name_offset_map.name(get_pronunciation_index(t, alpha)) : "");
 
       if (index) {
+        // rs must be a materialized snapshot, tmp is appended to below
         std::vector<std::string> rs = GetTagTokens(tmp);
-        std::vector<std::string> is = GetTagTokens(osmdata_.name_offset_map.name(index));
         bool bFound = false;
 
-        for (auto& i : is) {
-          for (auto& r : rs) {
+        for (std::string_view i : Tokenizer(osmdata_.name_offset_map.name(index), ';')) {
+          for (const auto& r : rs) {
             if (i == r) {
               bFound = true;
               break;

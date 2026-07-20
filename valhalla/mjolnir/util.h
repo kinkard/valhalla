@@ -15,6 +15,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -269,7 +270,7 @@ struct enhancer_stats {
  * @param  delim      defaults to ;
  * @return the vector of strings
  */
-std::vector<std::string> GetTagTokens(const std::string& tag_value, char delim = ';');
+std::vector<std::string> GetTagTokens(std::string_view tag_value, char delim = ';');
 
 /**
  * Splits a tag into a vector of strings.
@@ -277,7 +278,7 @@ std::vector<std::string> GetTagTokens(const std::string& tag_value, char delim =
  * @param  delim      delimiter
  * @return the vector of strings
  */
-std::vector<std::string> GetTagTokens(const std::string& tag_value, const std::string& delim_str);
+std::vector<std::string> GetTagTokens(std::string_view tag_value, std::string_view delim_str);
 
 /**
  * Remove double quotes.

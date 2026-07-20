@@ -221,14 +221,14 @@ MONTH get_month(const std::string& month) {
   return MONTH::kNone;
 }
 
-std::vector<uint64_t> get_time_range(const std::string& str) {
+std::vector<uint64_t> get_time_range(std::string_view str) {
 
   std::vector<uint64_t> time_domains;
 
   TimeDomain timedomain(0);
   // rm ()
   try {
-    std::string condition = str;
+    std::string condition(str);
     condition.erase(boost::remove_if(condition, boost::is_any_of("()")), condition.end());
 
     // rm white space at both ends

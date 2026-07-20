@@ -17,6 +17,7 @@
 #include "mjolnir/graphtilebuilder.h"
 #include "mjolnir/linkclassification.h"
 #include "mjolnir/node_expander.h"
+#include "mjolnir/tokenizer.h"
 #include "mjolnir/util.h"
 #include "scoped_timer.h"
 
@@ -1556,48 +1557,40 @@ void GraphBuilder::Build(const boost::property_tree::ptree& pt,
 
 // Get highway refs from relations
 std::string GraphBuilder::GetRef(const std::string& way_ref, const std::string& relation_ref) {
-  bool found = false;
   std::string refs;
-  std::vector<std::string> way_refs = GetTagTokens(way_ref);     // US 51;I 57
-  std::vector<std::string> refdirs = GetTagTokens(relation_ref); // US 51|north;I 57|north
-  for (auto& ref : way_refs) {
-    found = false;
-    for (const auto& refdir : refdirs) {
-      std::vector<std::string> tmp = GetTagTokens(refdir, '|'); // US 51|north
-      if (tmp.size() == 2) {
-        if (tmp[0] == ref) { // US 51 == US 51
-          if (!refs.empty()) {
-            refs += ";" + ref + " " + tmp[1]; // ref order of the way wins.
-          } else {
-            refs = ref + " " + tmp[1];
-          }
-          found = true;
-          break;
-        } else if (tmp[0].find(' ') != std::string::npos &&
-                   ref.find(' ') != std::string::npos) { // SR 747 vs OH 747
-          std::vector<std::string> sign1 = GetTagTokens(tmp[0], ' ');
-          std::vector<std::string> sign2 = GetTagTokens(ref, ' ');
-          if (sign1.size() == 2 && sign2.size() == 2) {
-            if (sign1[1] == sign2[1]) { // 747 == 747
-              if (!refs.empty()) {
-                refs += ";" + ref + " " + tmp[1]; // ref order of the way wins.
-              } else {
-                refs = ref + " " + tmp[1];
-              }
-              found = true;
-              break;
-            }
-          }
+  for (std::string_view ref : Tokenizer(way_ref, ';')) { // US 51;I 57
+    bool found = false;
+    // US 51|north;I 57|north
+    for (std::string_view refdir : Tokenizer(relation_ref, ';')) {
+      if (Tokenizer(refdir, '|').count() != 2) { // want "<ref>|<direction>"
+        continue;
+      }
+      auto bar = refdir.find('|');
+      std::string_view name = refdir.substr(0, bar);       // US 51
+      std::string_view direction = refdir.substr(bar + 1); // north
+
+      bool match = name == ref; // US 51 == US 51
+      // otherwise compare just the number of "<prefix> <number>" refs, e.g. SR 747 vs OH 747
+      if (!match && Tokenizer(name, ' ').count() == 2 && Tokenizer(ref, ' ').count() == 2) {
+        match = name.substr(name.find(' ') + 1) == ref.substr(ref.find(' ') + 1); // 747 == 747
+      }
+      if (match) {
+        if (!refs.empty()) {
+          refs += ';';
         }
+        refs += ref; // ref order of the way wins.
+        refs += ' ';
+        refs += direction;
+        found = true;
+        break;
       }
     }
 
     if (!found) { // no direction found in relations for this ref
       if (!refs.empty()) {
-        refs += ";" + ref;
-      } else {
-        refs = ref;
+        refs += ';';
       }
+      refs += ref;
     }
   }
   return refs;

@@ -2,6 +2,7 @@
 #include "baldr/edgeinfo.h"
 #include "midgard/logging.h"
 #include "midgard/util.h"
+#include "mjolnir/tokenizer.h"
 #include "mjolnir/util.h"
 
 #include <boost/algorithm/string.hpp>
@@ -1199,9 +1200,9 @@ void OSMWay::GetTaggedValues(const UniqueNames& name_offset_map,
   }
   if (level_ref_index_ != 0) {
     // level:ref
-    auto tokens = GetTagTokens(name_offset_map.name(level_ref_index_));
-    for (const auto& t : tokens) {
-      names.emplace_back(encode_tag(TaggedValue::kLevelRef) + t);
+    for (std::string_view t : Tokenizer(name_offset_map.name(level_ref_index_), ';')) {
+      auto& name = names.emplace_back(encode_tag(TaggedValue::kLevelRef));
+      name += t;
     }
   }
 }

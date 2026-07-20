@@ -15,17 +15,15 @@
 #include "mjolnir/pbfgraphparser.h"
 #include "mjolnir/restrictionbuilder.h"
 #include "mjolnir/shortcutbuilder.h"
+#include "mjolnir/tokenizer.h"
 #include "mjolnir/transitbuilder.h"
 #include "scoped_timer.h"
 
-#include <boost/algorithm/string/constants.hpp>
-#include <boost/algorithm/string/split.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <cpp-statsd-client/StatsdClient.hpp>
 
 #include <filesystem>
 #include <format>
-#include <regex>
 
 using boost::property_tree::ptree;
 using namespace valhalla::baldr;
@@ -422,24 +420,23 @@ void set_tileset_build_id(const std::string& tile_dir) {
   });
 }
 
-/**
- * Splits a tag into a vector of strings.  Delim defaults to ;
- */
-std::vector<std::string> GetTagTokens(const std::string& tag_value, char delim) {
+std::vector<std::string> GetTagTokens(std::string_view tag_value, char delim) {
   std::vector<std::string> tokens;
-  boost::algorithm::split(
-      tokens, tag_value,
-      [delim](auto&& PH1) { return std::equal_to<char>()(delim, std::forward<decltype(PH1)>(PH1)); },
-      boost::algorithm::token_compress_off);
-
+  for (std::string_view token : Tokenizer(tag_value, delim)) {
+    tokens.emplace_back(token);
+  }
   return tokens;
 }
 
-std::vector<std::string> GetTagTokens(const std::string& tag_value, const std::string& delim_str) {
-  std::regex regex_str(delim_str);
-  std::vector<std::string> tokens(std::sregex_token_iterator(tag_value.begin(), tag_value.end(),
-                                                             regex_str, -1),
-                                  std::sregex_token_iterator());
+std::vector<std::string> GetTagTokens(std::string_view tag_value, std::string_view delim_str) {
+  std::vector<std::string> tokens;
+  for (std::string_view token : Tokenizer(tag_value, delim_str)) {
+    tokens.emplace_back(token);
+  }
+  // the historic regex-based splitting dropped a single trailing empty token
+  if (tokens.size() > 1 && tokens.back().empty()) {
+    tokens.pop_back();
+  }
   return tokens;
 }
 

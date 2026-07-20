@@ -7,6 +7,8 @@
 
 #include <filesystem>
 #include <sstream>
+#include <string>
+#include <vector>
 
 #if !defined(VALHALLA_SOURCE_DIR)
 #define VALHALLA_SOURCE_DIR
@@ -20,9 +22,33 @@ namespace {
 using boost::property_tree::ptree;
 using valhalla::baldr::GraphId;
 using valhalla::mjolnir::build_tile_set;
+using valhalla::mjolnir::GetTagTokens;
 using valhalla::mjolnir::TileManifest;
 using namespace valhalla;
 using namespace valhalla::midgard;
+
+// GetTagTokens is the owning materialization over Tokenizer; Tokenizer itself is covered separately
+TEST(UtilMjolnir, GetTagTokensCharDelimiter) {
+  using strings = std::vector<std::string>;
+  EXPECT_EQ(GetTagTokens(""), (strings{""}));
+  EXPECT_EQ(GetTagTokens("a;b"), (strings{"a", "b"}));
+  EXPECT_EQ(GetTagTokens("a;"), (strings{"a", ""}));
+  EXPECT_EQ(GetTagTokens(";a"), (strings{"", "a"}));
+  EXPECT_EQ(GetTagTokens("a;;b"), (strings{"a", "", "b"}));
+  EXPECT_EQ(GetTagTokens("a:b", ':'), (strings{"a", "b"}));
+}
+
+// the substring overload drops a single trailing empty token, matching the historic behavior
+TEST(UtilMjolnir, GetTagTokensStringDelimiter) {
+  using strings = std::vector<std::string>;
+  EXPECT_EQ(GetTagTokens("", " - "), (strings{""}));
+  EXPECT_EQ(GetTagTokens("a - b", " - "), (strings{"a", "b"}));
+  EXPECT_EQ(GetTagTokens("a - ", " - "), (strings{"a"}));
+  EXPECT_EQ(GetTagTokens(" - ", " - "), (strings{""}));
+  EXPECT_EQ(GetTagTokens("a -  - ", " - "), (strings{"a", ""}));
+  EXPECT_EQ(GetTagTokens(" - a", " - "), (strings{"", "a"}));
+  EXPECT_EQ(GetTagTokens("a / b", " / "), (strings{"a", "b"}));
+}
 
 // Verify that this function runs
 TEST(UtilMjolnir, BuildTileSet) {

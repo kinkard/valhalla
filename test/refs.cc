@@ -67,6 +67,18 @@ TEST(Refs, Basic) {
   EXPECT_TRUE(output.empty());
 }
 
+TEST(Refs, MatchByNumber) {
+  // when the ref prefixes differ but the numbers match, the relation direction is still applied
+  // and the way's ref spelling wins
+  EXPECT_EQ(GraphBuilder::GetRef("OH 747", "SR 747|north"), "OH 747 north");
+
+  // different numbers do not match, so the ref is kept without a direction
+  EXPECT_EQ(GraphBuilder::GetRef("OH 747", "SR 999|north"), "OH 747");
+
+  // the number match only fires when both refs split into exactly two space-separated tokens
+  EXPECT_EQ(GraphBuilder::GetRef("OH 747 Business", "SR 747|north"), "OH 747 Business");
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace valhalla {
@@ -30,7 +31,7 @@ baldr::DOW get_dow(const std::string& dow);
  */
 baldr::MONTH get_month(const std::string& month);
 
-std::vector<uint64_t> get_time_range(const std::string& condition);
+std::vector<uint64_t> get_time_range(std::string_view condition);
 
 } // namespace mjolnir
 } // namespace valhalla
