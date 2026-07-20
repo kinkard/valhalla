@@ -258,6 +258,15 @@ Pin deterministic OSM IDs via an `osm_id` tag on gurka ways/nodes. Example tests
 6. Examine the edge structure: `valhalla_service config.json locate '<location>'` — check edge count, way IDs, connectivity
 7. Design the gurka ASCII map to match the exact topology — including build flags (e.g., `{"mjolnir.include_pedestrian", "false"}`), connected ways, closed ways, etc.
 
+### Verifying "No Functional Change" by Tile Comparison
+
+For refactors/perf changes to tile build stages, byte-comparing output tiles from a real extract is the strongest check — but only per stage:
+
+1. Build once to the stage *before* yours: `valhalla_build_tiles -c config.json -e <prev_stage> extract.osm.pbf`, snapshot the tile dir (`cp -Rc` clones instantly on APFS).
+2. Per experiment: restore the snapshot, run only your stage (`-s <stage> -e <stage>`), then `diff -rq` against a golden run of the unmodified binary over the same snapshot.
+
+**IMPORTANT — full-pipeline byte-diffs flake even on unmodified master:** two identical full builds differ in a handful of tiles (Sweden: ~17) from (a) `SetStopYieldSignInfo` in `graphenhancer.cc` reading neighbor tiles whose `transition_index` temp bits other threads write/clear concurrently, and (b) ±1 LSB in bin bounding circles from `GraphValidator`. Additionally, tile header bytes 88–93 are the content hash and 94–95 the tileset build id — the build id changes when *any* tile changes and ripples into *every* tile. Filter real diffs with `cmp -l a.gph b.gph | awk '$1 > 96'`. The intermediate `old_nodes_to_new_nodes.bin` always differs run-to-run (uninitialized struct padding); ignore it.
+
 ### Conventions
 
 - `TEST(SuiteName, TestName)`, `TEST_F(FixtureClass, TestName)`, or `TEST_P(FixtureClass, TestName)` for parameterized tests. PascalCase, no underscores in test names.
