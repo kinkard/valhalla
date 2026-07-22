@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <queue>
 #include <thread>
 #include <utility>
 
