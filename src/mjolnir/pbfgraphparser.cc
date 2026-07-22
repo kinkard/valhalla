@@ -5407,13 +5407,48 @@ void PBFGraphParser::ParseNodes(const boost::property_tree::ptree& pt,
   const auto concurrency =
       std::max<size_t>(1, pt.get<size_t>("concurrency", std::thread::hardware_concurrency()));
 
-  LOG_INFO("Sorting osm way node references by node id...");
-  {
-    sequence<OSMWayNode> way_nodes(way_nodes_file, false);
-    way_nodes.sort([](const OSMWayNode& a,
-                      const OSMWayNode& b) { return a.node.osmid_ < b.node.osmid_; },
-                   concurrency);
+  // Benchmark the sort across buffer sizes and worker counts. "forth" sorts by node id,
+  // "back" restores the original way index order, so every run starts from the same file
+  // order. Buffer sizes are in bytes here, sort takes them in elements.
+  const std::pair<size_t, uint32_t> configs[] = {
+      {128 * 1024 * 1024, 4},  {256 * 1024 * 1024, 4},
+      {512 * 1024 * 1024, 4},  {1024 * 1024 * 1024, 4},
+
+      {128 * 1024 * 1024, 8},  {256 * 1024 * 1024, 8},
+      {512 * 1024 * 1024, 8},  {1024 * 1024 * 1024, 8},
+
+      {128 * 1024 * 1024, 12}, {256 * 1024 * 1024, 12},
+      {512 * 1024 * 1024, 12}, {1024 * 1024 * 1024, 12},
+
+      {128 * 1024 * 1024, 16}, {256 * 1024 * 1024, 16},
+      {512 * 1024 * 1024, 16}, {1024 * 1024 * 1024, 16},
+  };
+  for (const auto& [buffer_bytes, workers] : configs) {
+    auto run_sort = [&](const auto& predicate) {
+      auto start = std::chrono::steady_clock::now();
+      {
+        sequence<OSMWayNode> way_nodes(way_nodes_file, false);
+        way_nodes.sort(predicate, workers, buffer_bytes / sizeof(OSMWayNode));
+      }
+      return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    };
+
+    double forth = run_sort(
+        [](const OSMWayNode& a, const OSMWayNode& b) { return a.node.osmid_ < b.node.osmid_; });
+    double back = run_sort([](const OSMWayNode& a, const OSMWayNode& b) {
+      if (a.way_index == b.way_index) {
+        return a.way_shape_node_index < b.way_shape_node_index;
+      }
+      return a.way_index < b.way_index;
+    });
+
+    char line[128];
+    snprintf(line, sizeof(line), "parallel sort and merge %zuMB %uW, forth %.1fs, back %.1fs",
+             buffer_bytes / (1024 * 1024), workers, forth, back);
+    LOG_INFO(line);
   }
+
+  exit(1); // TODO: remove this exit when we are ready to parse nodes
 
   // Parse node in all the input files. Skip any that are not marked from
   // being used in a way.
