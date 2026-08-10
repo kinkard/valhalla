@@ -188,7 +188,8 @@ void BuildEdgeShapes(const std::string& way_nodes_file,
         const OSMNode& node = way_nodes.get()[i].node;
         shapes.get()[i] = {.lng7 = node.lng7_, .lat7 = node.lat7_};
         if (keep_node_ids) {
-          node_ids.get()[i] = node.osmid_;
+          // no OSM object has id 0, so it marks the synthetic nodes to be skipped later on
+          node_ids.get()[i] = node.synthetic() ? 0 : node.osmid_;
         }
       }
     });
@@ -580,7 +581,11 @@ void BuildTileSet(const std::string& ways_file,
     for (size_t i = 0; i < count; ++i, ++idx) {
       shape.emplace_back((*edge_shapes[idx]).latlng());
       if (keep_all_nodes || (graph_nodes_only && (i == 0 || i == count - 1))) {
-        osm_node_ids.push_back(*(*edge_node_ids)[idx]);
+        // zeroes mark synthetic nodes, whose ids aren't real OSM ids
+        const uint64_t node_id = *(*edge_node_ids)[idx];
+        if (node_id != 0) {
+          osm_node_ids.push_back(node_id);
+        }
       }
     }
     if (!osm_node_ids.empty()) {
@@ -996,9 +1001,10 @@ void BuildTileSet(const std::string& ways_file,
               bike_network = w.bike_network();
             }
 
+            const uint64_t wayid = w.way_id() > osmdata.max_way_id ? 0 : w.way_id();
             edge_info_offset =
                 graphtile.AddEdgeInfo(edge_pair.second, (*nodes[source]).graph_id,
-                                      (*nodes[target]).graph_id, w.way_id(), kNoElevationData,
+                                      (*nodes[target]).graph_id, wayid, kNoElevationData,
                                       bike_network, speed_limit, shape, names, tagged_values,
                                       linguistics, types, added, (diff_names || dual_refs));
 

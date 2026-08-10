@@ -8,6 +8,7 @@
    * ADDED: `cost` in verbose matrix output [#6249](https://github.com/valhalla/valhalla/pull/6249)
    * ADDED: `expansion_index` expansion property [#6251](https://github.com/valhalla/valhalla/pull/6251)
    * CHANGED: Smaller `edge_shapes.bin` file for faster reads during tiles build [#6234](https://github.com/valhalla/valhalla/pull/6234)
+   * ADDED: route through pedestrian areas via generated medial axis traversals, behind the `mjolnir.pedestrian_areas` config option [#6195](https://github.com/valhalla/valhalla/pull/6195)
 
 ## Release Date: 2026-07-24 Valhalla 3.8.3
 * **Removed**
