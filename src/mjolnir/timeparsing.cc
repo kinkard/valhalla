@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
-#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -22,7 +21,8 @@ namespace {
 enum class TokenKind : uint8_t {
   kMonth,   // value is 1 (January) to 12 (December)
   kWeekday, // value is 1 (Sunday) to 7 (Saturday), as baldr::DOW
-  kNumber,  // a bare number, e.g. a day of the month or a year
+  kNumber,  // a bare number, e.g. a day of the month
+  kYear,    // four digits in [1900, 3000), makes a date range temporary
   kTime,    // value is minutes since midnight
   kNth,     // [n] or [-n], the nth weekday of a month, negative counts from the end
   kDash,
@@ -34,7 +34,7 @@ enum class TokenKind : uint8_t {
   kSunEvent, // sunrise, sunset, dawn or dusk
   kOff,      // off or closed
   kNoise,    // filler words like "and", skipped entirely
-  kUnknown,  // anything else, fails the rule it appears in
+  kUnknown,  // anything else, e.g. a `weight>3.5` qualifier, skipped within a rule
   kEnd,
 };
 
@@ -98,34 +98,41 @@ std::vector<Token> tokenize(std::string_view str) {
   const size_t n = str.size();
   while (i < n) {
     const char c = str[i];
-    // parens and stray colons carry no meaning, quoted comments are skipped entirely
+    // parens and stray colons carry no meaning
     if (c == ' ' || c == '\t' || c == '(' || c == ')' || c == ':') {
       ++i;
-    } else if (c == '"') {
-      i = str.find('"', i + 1);
-      i = (i == std::string_view::npos) ? n : i + 1;
-    } else if (str.compare(i, 6, "&quot;") == 0) {
-      i = str.find("&quot;", i + 6);
-      i = (i == std::string_view::npos) ? n : i + 6;
+    } else if (static_cast<unsigned char>(c) >= 0x80) {
+      // a byte outside ascii opens a utf-8 sequence and mappers use a handful of them: en dash,
+      // em dash and the minus sign all stand for a dash, a non breaking space for a space
+      if (str.compare(i, 3, "\xE2\x80\x93") == 0 || str.compare(i, 3, "\xE2\x80\x94") == 0 ||
+          str.compare(i, 3, "\xE2\x88\x92") == 0) {
+        tokens.push_back({TokenKind::kDash, 0});
+        i += 3;
+      } else if (str.compare(i, 2, "\xC2\xA0") == 0) {
+        i += 2;
+      } else {
+        tokens.push_back({TokenKind::kUnknown, 0});
+        ++i;
+      }
     } else if (c == '-') {
       tokens.push_back({TokenKind::kDash, 0});
       ++i;
-    } else if (str.compare(i, 3, "\xE2\x80\x93") == 0 || str.compare(i, 3, "\xE2\x80\x94") == 0 ||
-               str.compare(i, 3, "\xE2\x88\x92") == 0) {
-      // en dash, em dash and the minus sign are all dashes
-      tokens.push_back({TokenKind::kDash, 0});
-      i += 3;
-    } else if (str.compare(i, 2, "\xC2\xA0") == 0) { // non breaking space
-      i += 2;
     } else if (c == ',') {
       tokens.push_back({TokenKind::kComma, 0});
       ++i;
-    } else if (c == ';') {
+    } else if (c == ';' || c == '|') {
+      // a `||` fallback rule is close enough to a rule of its own
       tokens.push_back({TokenKind::kSemicolon, 0});
       ++i;
     } else if (c == '+') {
       tokens.push_back({TokenKind::kPlus, 0});
       ++i;
+    } else if (c == '"') { // a quoted comment carries nothing to parse
+      i = str.find('"', i + 1);
+      i = (i == std::string_view::npos) ? n : i + 1;
+    } else if (c == '&' && str.compare(i, 6, "&quot;") == 0) {
+      i = str.find("&quot;", i + 6);
+      i = (i == std::string_view::npos) ? n : i + 6;
     } else if (c == '[') {
       // [n] or [-n]
       size_t j = i + 1;
@@ -141,8 +148,11 @@ std::vector<Token> tokenize(std::string_view str) {
         tokens.push_back({TokenKind::kNth, negative ? -value : value});
         i = j + 1;
       } else {
+        // an unreadable group, e.g. Su[1,-1]. Drop it whole, its pieces must not read as
+        // selectors of their own
+        const size_t close = str.find(']', i + 1);
+        i = (close != std::string_view::npos && close - i <= 8) ? close + 1 : i + 1;
         tokens.push_back({TokenKind::kUnknown, 0});
-        ++i;
       }
     } else if (std::isdigit(static_cast<unsigned char>(c))) {
       int32_t value = 0;
@@ -161,6 +171,14 @@ std::vector<Token> tokenize(std::string_view str) {
           minutes = minutes * 10 + (str[i] - '0');
           ++i, ++mm_digits;
         }
+        // a 12 hour clock, e.g. 04:00pm. A suffix that can't apply to the hour is only dropped
+        if (i + 1 < n && (str[i] == 'a' || str[i] == 'A' || str[i] == 'p' || str[i] == 'P') &&
+            (str[i + 1] == 'm' || str[i + 1] == 'M')) {
+          if (value >= 1 && value <= 12) {
+            value = (value % 12) + ((str[i] == 'p' || str[i] == 'P') ? 12 : 0);
+          }
+          i += 2;
+        }
         if (value <= 48 && minutes <= 59) {
           tokens.push_back({TokenKind::kTime, value * 60 + minutes});
         } else {
@@ -170,6 +188,8 @@ std::vector<Token> tokenize(std::string_view str) {
                  (i + 2 == n || !std::isdigit(static_cast<unsigned char>(str[i + 2])))) {
         tokens.push_back({TokenKind::kAlways, 0});
         i += 2;
+      } else if (digits == 4 && value >= 1900 && value < 3000) {
+        tokens.push_back({TokenKind::kYear, value});
       } else {
         tokens.push_back({TokenKind::kNumber, value});
       }
@@ -236,23 +256,69 @@ struct DatePoint {
   int32_t day = 0;
   int32_t weekday = 0;
   int32_t week = 0;
+  int32_t year = 0;
 };
 
+struct DateRange {
+  DatePoint begin;
+  DatePoint end;
+};
+
+struct TimeRange {
+  int32_t begin = 0;
+  int32_t end = 0;
+};
+
+// The weekday selector of a rule, e.g. Mo-Fr or Su[1]
+struct Weekdays {
+  uint8_t dow = 0;
+  uint8_t week = 0;     // nth weekday of every month, from a Su[1] style selector
+  bool nth_dow = false; // whether that selector was there, [1] and no week are both 1
+};
+
+bool starts_dates(const TokenCursor& t, size_t ahead = 0) {
+  return t.kind(ahead) == TokenKind::kMonth ||
+         (t.kind(ahead) == TokenKind::kYear && t.kind(ahead + 1) == TokenKind::kMonth) ||
+         // a day in front of its month, e.g. 26 November
+         (t.kind(ahead) == TokenKind::kNumber && t.kind(ahead + 1) == TokenKind::kMonth);
+}
+
+// Tokens a TimeDomain can't hold: a qualifier on top of the time, e.g. `weight>3.5 AND
+// 20:00-06:00`, or a holiday. Skipping them leaves the rule covering more than the tag says
+bool is_ignorable(const TokenCursor& t, size_t ahead = 0) {
+  const TokenKind kind = t.kind(ahead);
+  return kind == TokenKind::kUnknown || kind == TokenKind::kNumber || kind == TokenKind::kHoliday;
+}
+
 RuleResult parse_date_point(TokenCursor& t, DatePoint& point, bool expect_month) {
+  // a year is written on either side of the date, e.g. 2025 Feb 15 or Feb 15 2025
   if (expect_month) {
+    if (t.kind() == TokenKind::kYear) {
+      point.year = t.eat();
+    }
+    // the day comes in front of its month too, e.g. 26 November
+    if (t.kind() == TokenKind::kNumber && t.kind(1) == TokenKind::kMonth) {
+      if (t.value() < 1 || t.value() > 31) {
+        return RuleResult::kFailed;
+      }
+      point.day = t.eat();
+    }
     if (t.kind() != TokenKind::kMonth) {
       return RuleResult::kFailed;
     }
     point.month = t.eat();
+    if (point.day != 0) {
+      return RuleResult::kOk;
+    }
   }
   if (t.kind() == TokenKind::kNumber) {
-    if (t.value() >= 1000) { // a year
-      return RuleResult::kUnsupported;
-    }
     if (t.value() < 1 || t.value() > 31) {
       return RuleResult::kFailed;
     }
     point.day = t.eat();
+    if (t.kind() == TokenKind::kYear) {
+      point.year = t.eat();
+    }
   } else if (t.kind() == TokenKind::kWeekday && t.kind(1) == TokenKind::kNth) {
     point.weekday = t.eat();
     const int32_t nth = t.eat();
@@ -267,120 +333,107 @@ RuleResult parse_date_point(TokenCursor& t, DatePoint& point, bool expect_month)
   return RuleResult::kOk;
 }
 
-RuleResult parse_dates(TokenCursor& t, TimeDomain& td) {
-  DatePoint begin;
-  RuleResult result = parse_date_point(t, begin, true);
+RuleResult parse_date_range(TokenCursor& t, DateRange& range) {
+  RuleResult result = parse_date_point(t, range.begin, true);
   if (result != RuleResult::kOk) {
     return result;
   }
 
-  DatePoint end;
   if (t.kind() == TokenKind::kDash) {
     ++t.pos;
-    if (t.kind() == TokenKind::kMonth) {
-      result = parse_date_point(t, end, true);
-      if (result != RuleResult::kOk) {
-        return result;
-      }
-    } else if (t.kind() == TokenKind::kNumber && begin.day != 0) {
+    if (starts_dates(t)) {
+      result = parse_date_point(t, range.end, true);
+    } else if (t.kind() == TokenKind::kNumber && range.begin.day != 0) {
       // a range within one month, e.g. May 16-31
-      result = parse_date_point(t, end, false);
-      if (result != RuleResult::kOk) {
-        return result;
-      }
-      end.month = begin.month;
+      result = parse_date_point(t, range.end, false);
+      range.end.month = range.begin.month;
     } else {
       return RuleResult::kFailed;
+    }
+    if (result != RuleResult::kOk) {
+      return result;
     }
   } else {
     // a single point spans onto itself, e.g. Dec or May 15 or Dec Su[-1]
-    end.month = begin.month;
-    end.day = begin.day;
-    end.week = begin.week;
+    range.end.month = range.begin.month;
+    range.end.day = range.begin.day;
+    range.end.week = range.begin.week;
   }
 
-  if (begin.weekday != 0 || end.weekday != 0) {
-    // the nth weekday of a month is its own domain type. Until a weekday selector says
-    // otherwise, assume the restriction covers the entire week
-    td.set_type(kNthDow);
-    td.set_dow(kAllDaysOfWeek);
-    td.set_begin_month(begin.month);
-    td.set_begin_day_dow(begin.weekday != 0 ? begin.weekday : begin.day);
-    td.set_begin_week(begin.week);
-    td.set_end_month(end.month);
-    td.set_end_day_dow(end.weekday != 0 ? end.weekday : end.day);
-    td.set_end_week(end.week);
-  } else {
-    td.set_type(kYMD);
-    td.set_begin_month(begin.month);
-    td.set_begin_day_dow(begin.day);
-    td.set_end_month(end.month);
-    td.set_end_day_dow(end.day);
+  // TimeDomain repeats a range every year, so a year on both ends bounds it to an interval it
+  // cannot hold: a multi year closure stored yearly is even open for the months in between
+  if (range.begin.year != 0 && range.end.year != 0) {
+    return RuleResult::kUnsupported;
   }
   return RuleResult::kOk;
 }
 
-RuleResult parse_weekdays(TokenCursor& t, TimeDomain& td) {
-  // wipe out the assumption that an nth weekday restriction covers the entire week
-  uint8_t mask = (td.type() == kNthDow && td.dow() == kAllDaysOfWeek) ? 0 : td.dow();
-
-  const int32_t first = t.eat();
-  if (t.kind() == TokenKind::kNth) {
-    // Su[1] is the first Sunday of every month
-    const int32_t nth = t.eat();
-    if (nth == -1) {
-      td.set_begin_week(5);
-    } else if (nth >= 1 && nth <= 5) {
-      td.set_begin_week(nth);
-    } else {
-      return RuleResult::kUnsupported;
+RuleResult parse_dates(TokenCursor& t, std::vector<DateRange>& dates) {
+  while (true) {
+    DateRange range;
+    const RuleResult result = parse_date_range(t, range);
+    if (result != RuleResult::kOk) {
+      return result;
     }
-    td.set_type(kNthDow);
-    td.set_dow(mask | dow_mask_bit(first));
+    dates.push_back(range);
+
+    // a list of dates, e.g. Jan 01,Apr 19,Dec 25 or Jan 07-Jul 14,Sep 01-Dec 19
+    if (t.kind() == TokenKind::kComma && starts_dates(t, 1)) {
+      ++t.pos;
+      continue;
+    }
     return RuleResult::kOk;
   }
-
-  if (t.kind() == TokenKind::kDash) {
-    ++t.pos;
-    if (t.kind() != TokenKind::kWeekday) {
-      return RuleResult::kFailed;
-    }
-    int32_t from = first;
-    const int32_t to = t.eat();
-    if (from > to) { // Th-Tu wraps around the end of the week
-      for (; from <= 7; ++from) {
-        mask |= dow_mask_bit(from);
-      }
-      from = 1;
-    }
-    for (; from <= to; ++from) {
-      mask |= dow_mask_bit(from);
-    }
-  } else {
-    mask |= dow_mask_bit(first);
-    // a list of days, holidays in it are ignored
-    while (t.kind() == TokenKind::kComma &&
-           (t.kind(1) == TokenKind::kWeekday || t.kind(1) == TokenKind::kHoliday)) {
-      ++t.pos;
-      if (t.kind() == TokenKind::kHoliday) {
-        ++t.pos;
-      } else {
-        mask |= dow_mask_bit(t.eat());
-      }
-    }
-  }
-  // a holiday appended after a range is ignored too, e.g. Mo-Fr,PH
-  while (t.kind() == TokenKind::kComma && t.kind(1) == TokenKind::kHoliday) {
-    t.pos += 2;
-  }
-  td.set_dow(mask);
-  return RuleResult::kOk;
 }
 
-RuleResult parse_times(TokenCursor& t,
-                       const TimeDomain& td,
-                       std::vector<uint64_t>& time_domains,
-                       bool& emitted) {
+RuleResult parse_weekdays(TokenCursor& t, Weekdays& weekdays) {
+  while (true) {
+    const int32_t first = t.eat();
+    weekdays.dow |= dow_mask_bit(first);
+
+    if (t.kind() == TokenKind::kNth) {
+      // Su[1] is the first Sunday of every month
+      const int32_t nth = t.eat();
+      if (nth == -1) {
+        weekdays.week = 5;
+      } else if (nth >= 1 && nth <= 5) {
+        weekdays.week = nth;
+      } else {
+        return RuleResult::kUnsupported;
+      }
+      weekdays.nth_dow = true;
+    } else if (t.kind() == TokenKind::kDash) {
+      ++t.pos;
+      if (t.kind() != TokenKind::kWeekday) {
+        return RuleResult::kFailed;
+      }
+      int32_t from = first;
+      const int32_t to = t.eat();
+      if (from > to) { // Th-Tu wraps around the end of the week
+        for (; from <= 7; ++from) {
+          weekdays.dow |= dow_mask_bit(from);
+        }
+        from = 1;
+      }
+      for (; from <= to; ++from) {
+        weekdays.dow |= dow_mask_bit(from);
+      }
+    }
+
+    // a holiday in the list has no dates to resolve, but it must not end the list either
+    while (t.kind() == TokenKind::kComma && t.kind(1) == TokenKind::kHoliday) {
+      t.pos += 2;
+    }
+    // a list mixes single days and ranges, e.g. Mo-Tu,Th-Fr
+    if (t.kind() == TokenKind::kComma && t.kind(1) == TokenKind::kWeekday) {
+      ++t.pos;
+      continue;
+    }
+    return RuleResult::kOk;
+  }
+}
+
+RuleResult parse_times(TokenCursor& t, std::vector<TimeRange>& times) {
   while (true) {
     const int32_t begin = t.eat();
     int32_t end;
@@ -400,16 +453,17 @@ RuleResult parse_times(TokenCursor& t,
     } else {
       return RuleResult::kFailed;
     }
+    // an hour past midnight belongs to the next day, e.g. 20:00-26:00 is 20:00-02:00. A range
+    // longer than a day cannot repeat daily, which is all TimeDomain can do
+    if (end - begin > 24 * 60) {
+      return RuleResult::kUnsupported;
+    }
+    times.push_back({begin % (24 * 60), end % (24 * 60)});
 
-    // every time range becomes its own restriction
-    TimeDomain range = td;
-    range.set_begin_hrs(begin / 60);
-    range.set_begin_mins(begin % 60);
-    range.set_end_hrs(end / 60);
-    range.set_end_mins(end % 60);
-    time_domains.push_back(range.td_value());
-    emitted = true;
-
+    // ranges are usually comma separated, but a bare space between them happens too
+    if (t.kind() == TokenKind::kTime) {
+      continue;
+    }
     if (t.kind() == TokenKind::kComma && t.kind(1) == TokenKind::kTime) {
       ++t.pos;
       continue;
@@ -418,11 +472,51 @@ RuleResult parse_times(TokenCursor& t,
   }
 }
 
-RuleResult parse_rule(TokenCursor& t, std::vector<uint64_t>& time_domains) {
-  TimeDomain td(0);
+// TimeDomain holds one date and one time range, so a rule naming several of either becomes one
+// restriction per combination
+void emit(const Weekdays& weekdays,
+          const DateRange& date,
+          const std::vector<TimeRange>& times,
+          std::vector<uint64_t>& time_domains) {
+  const bool nth_date = date.begin.weekday != 0 || date.end.weekday != 0;
 
-  // public and school holidays can't be resolved into dates: a rule about them alone is
-  // skipped in one piece, in a list with weekdays they are simply ignored
+  TimeDomain td(0);
+  // the type has to be set first, it decides how the day fields are validated
+  if (nth_date || weekdays.nth_dow) {
+    td.set_type(kNthDow);
+  }
+  // an nth weekday range with no weekday selector of its own covers the entire week
+  td.set_dow(nth_date && weekdays.dow == 0 ? kAllDaysOfWeek : weekdays.dow);
+  td.set_begin_month(date.begin.month);
+  td.set_end_month(date.end.month);
+  if (nth_date) {
+    td.set_begin_day_dow(date.begin.weekday != 0 ? date.begin.weekday : date.begin.day);
+    td.set_end_day_dow(date.end.weekday != 0 ? date.end.weekday : date.end.day);
+    td.set_begin_week(date.begin.week);
+    td.set_end_week(date.end.week);
+  } else {
+    td.set_begin_day_dow(date.begin.day);
+    td.set_end_day_dow(date.end.day);
+    td.set_begin_week(weekdays.week);
+  }
+
+  if (times.empty()) {
+    time_domains.push_back(td.td_value());
+    return;
+  }
+  for (const TimeRange& time : times) {
+    TimeDomain range = td;
+    range.set_begin_hrs(time.begin / 60);
+    range.set_begin_mins(time.begin % 60);
+    range.set_end_hrs(time.end / 60);
+    range.set_end_mins(time.end % 60);
+    time_domains.push_back(range.td_value());
+  }
+}
+
+RuleResult parse_rule(TokenCursor& t, std::vector<uint64_t>& time_domains) {
+  // a rule about public or school holidays alone has no dates to resolve, drop it in one piece.
+  // Next to other selectors a holiday is merely ignored, see is_ignorable
   if (t.kind() == TokenKind::kHoliday &&
       !(t.kind(1) == TokenKind::kComma && t.kind(2) == TokenKind::kWeekday)) {
     skip_rule(t);
@@ -433,26 +527,31 @@ RuleResult parse_rule(TokenCursor& t, std::vector<uint64_t>& time_domains) {
     return RuleResult::kUnsupported;
   }
 
-  // years of temporary restrictions don't fit into TimeDomain
-  if (t.kind() == TokenKind::kNumber && t.value() >= 1000) {
-    return RuleResult::kUnsupported;
-  }
-
-  if (t.kind() == TokenKind::kMonth) {
-    const RuleResult result = parse_dates(t, td);
-    if (result != RuleResult::kOk) {
-      return result;
+  Weekdays weekdays;
+  std::vector<DateRange> dates;
+  std::vector<TimeRange> times;
+  // dates and weekdays come in either order, e.g. Su,Mo Jul 16-Sep 04
+  while (true) {
+    RuleResult result;
+    if (starts_dates(t)) {
+      result = parse_dates(t, dates);
+    } else if (t.kind() == TokenKind::kWeekday) {
+      result = parse_weekdays(t, weekdays);
+    } else if (t.kind() == TokenKind::kComma && times.empty() &&
+               (t.kind(1) == TokenKind::kTime ||
+                (t.kind(1) == TokenKind::kWeekday && weekdays.dow == 0) ||
+                (starts_dates(t, 1) && dates.empty()))) {
+      // mappers also put a comma between the selectors of one rule, e.g. `Oct-Mar, 07:00-19:00`
+      // or `Su, Jul-Aug`. Only a selector the rule still lacks can be meant that way
+      ++t.pos;
+      continue;
+    } else if (is_ignorable(t) || (t.kind() == TokenKind::kComma && is_ignorable(t, 1))) {
+      // a comma inside a run of them is part of the same list, e.g. `motorcar,moped Mo-Sa 07:30`
+      ++t.pos;
+      continue;
+    } else {
+      break;
     }
-  }
-
-  // holidays listed in front of the weekdays are ignored, e.g. PH,Sat
-  while (t.kind() == TokenKind::kHoliday && t.kind(1) == TokenKind::kComma &&
-         t.kind(2) == TokenKind::kWeekday) {
-    t.pos += 2;
-  }
-
-  while (t.kind() == TokenKind::kWeekday) {
-    const RuleResult result = parse_weekdays(t, td);
     if (result != RuleResult::kOk) {
       return result;
     }
@@ -461,14 +560,13 @@ RuleResult parse_rule(TokenCursor& t, std::vector<uint64_t>& time_domains) {
   // 24/7 always holds: alone it means the whole week, after a date range it adds nothing
   if (t.kind() == TokenKind::kAlways) {
     ++t.pos;
-    if (td.td_value() == 0) {
-      td.set_dow(kAllDaysOfWeek);
+    if (dates.empty() && weekdays.dow == 0) {
+      weekdays.dow = kAllDaysOfWeek;
     }
   }
 
-  bool emitted = false;
   if (t.kind() == TokenKind::kTime) {
-    const RuleResult result = parse_times(t, td, time_domains, emitted);
+    const RuleResult result = parse_times(t, times);
     if (result != RuleResult::kOk) {
       return result;
     }
@@ -479,10 +577,14 @@ RuleResult parse_rule(TokenCursor& t, std::vector<uint64_t>& time_domains) {
     return RuleResult::kUnsupported;
   }
 
+  if (dates.empty() && times.empty() && weekdays.dow == 0) {
+    return RuleResult::kFailed;
+  }
+
   if (!at_rule_end(t)) {
     // trailing junk voids the rule unless the times have already been parsed: unquoted
     // free text comments are common enough to tolerate
-    if (!emitted) {
+    if (times.empty()) {
       return RuleResult::kFailed;
     }
     // a date, weekday or time here starts another rule, e.g. Mo-Fr 18:00-11:00 AND Sa
@@ -493,11 +595,13 @@ RuleResult parse_rule(TokenCursor& t, std::vector<uint64_t>& time_domains) {
     }
   }
 
-  if (!emitted) {
-    if (td.td_value() == 0) {
-      return RuleResult::kFailed;
+  if (dates.empty()) {
+    // no date selector, so the rule spans every month, which a default DateRange already says
+    emit(weekdays, DateRange(), times, time_domains);
+  } else {
+    for (const DateRange& date : dates) {
+      emit(weekdays, date, times, time_domains);
     }
-    time_domains.push_back(td.td_value());
   }
   return RuleResult::kOk;
 }
