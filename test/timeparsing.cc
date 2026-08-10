@@ -574,8 +574,8 @@ TEST(TimeParsing, WikiExamples) {
   ASSERT_EQ(get_time_range("Mo-Fr 08:30-20:00").size(), 1);
   ASSERT_EQ(get_time_range("Sa-Su 00:00-24:00").size(), 1);
   TryConditionalRestrictions("Sa-Su 00:00-24:00", 0, 0, 0b1000001, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0});
-  ASSERT_EQ(get_time_range("Mo 10:00-12:00,12:30-15:00; Tu-Fr 08:00-12:00,12:30-15:00; Sa "
-                           "08:00-12:00")
+  ASSERT_EQ(get_time_range(
+                "Mo 10:00-12:00,12:30-15:00; Tu-Fr 08:00-12:00,12:30-15:00; Sa 08:00-12:00")
                 .size(),
             5);
 
@@ -606,8 +606,7 @@ TEST(TimeParsing, WikiExamples) {
   // spelled out as a narrower rule instead, both of them are kept
   ASSERT_EQ(get_time_range("Mo-Sa 10:00-20:00; Tu 10:00-14:00").size(), 2);
   // the same for a date that is excluded, only the positive rules survive
-  ASSERT_EQ(get_time_range("Mo-Su 08:00-18:00; Apr 10-15 off; Jun 08:00-14:00; Aug off; Dec 25 "
-                           "off")
+  ASSERT_EQ(get_time_range("Mo-Su 08:00-18:00; Apr 10-15 off; Jun 08:00-14:00; Aug off; Dec 25 off")
                 .size(),
             2);
 }
