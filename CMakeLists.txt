@@ -310,7 +310,8 @@ set(valhalla_programs
 set(valhalla_data_tools valhalla_build_statistics valhalla_ways_to_edges valhalla_validate_transit
   valhalla_benchmark_admins valhalla_build_connectivity	valhalla_build_tiles valhalla_build_admins
   valhalla_convert_transit valhalla_ingest_transit valhalla_query_transit valhalla_add_predicted_traffic
-  valhalla_assign_speeds valhalla_add_elevation valhalla_build_landmarks valhalla_add_landmarks)
+  valhalla_assign_speeds valhalla_add_elevation valhalla_build_landmarks valhalla_add_landmarks
+  valhalla_dump_conditional_tags)
 
 ## Valhalla services
 set(valhalla_services valhalla_loki_worker valhalla_odin_worker valhalla_thor_worker)
@@ -341,6 +342,10 @@ if(ENABLE_DATA_TOOLS)
     endif()
     install(TARGETS ${program} DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT runtime)
   endforeach()
+
+  # reads the pbf itself and de-duplicates with ankerl::unordered_dense
+  target_include_directories(valhalla_dump_conditional_tags
+    PRIVATE ${libosmium_include_dirs} ${unordered_dense_include_dir})
 
   # Target-specific dependencies
   target_sources(valhalla_build_statistics
