@@ -468,6 +468,33 @@ TEST(TimeParsing, WeekdaysBeforeDates) {
                              {9, 4, 0, 0, 0});
 }
 
+// the selector is also written behind the times, which is still one rule
+TEST(TimeParsing, SelectorAfterTimes) {
+  ASSERT_EQ(get_time_range("08:00-20:00 Mo-Fr").size(), 1);
+  TryConditionalRestrictions("08:00-20:00 Mo-Fr", 0, 0, 0b0111110, {0, 0, 0, 8, 0}, {0, 0, 0, 20, 0});
+  ASSERT_EQ(get_time_range("(07:00-16:30 AND Mo-Fr)").size(), 1);
+  TryConditionalRestrictions("(07:00-16:30 AND Mo-Fr)", 0, 0, 0b0111110, {0, 0, 0, 7, 0},
+                             {0, 0, 0, 16, 30});
+  ASSERT_EQ(get_time_range("06:00-22:00 Jun 15-Sep 15").size(), 1);
+  TryConditionalRestrictions("06:00-22:00 Jun 15-Sep 15", 0, 0, 0, {6, 15, 0, 6, 0},
+                             {9, 15, 0, 22, 0});
+  // every time range of the rule takes the weekdays
+  const std::string two = "07:00-10:00, 16:00-20:00 Mo-Fr";
+  ASSERT_EQ(get_time_range(two).size(), 2);
+  TryConditionalRestrictions(two, 0, 0, 0b0111110, {0, 0, 0, 7, 0}, {0, 0, 0, 10, 0});
+  TryConditionalRestrictions(two, 1, 0, 0b0111110, {0, 0, 0, 16, 0}, {0, 0, 0, 20, 0});
+  // a selector that brings its own times is a rule of its own instead
+  const std::string apart = "Mo-Fr 18:00-11:00 AND Sa 00:00-10:00";
+  ASSERT_EQ(get_time_range(apart).size(), 2);
+  TryConditionalRestrictions(apart, 0, 0, 0b0111110, {0, 0, 0, 18, 0}, {0, 0, 0, 11, 0});
+  TryConditionalRestrictions(apart, 1, 0, 0b1000000, {0, 0, 0, 0, 0}, {0, 0, 0, 10, 0});
+  // and so is one held apart by a comma, where an absent time means the whole day
+  const std::string comma = "Mo-Sa 06:00-20:00, Su";
+  ASSERT_EQ(get_time_range(comma).size(), 2);
+  TryConditionalRestrictions(comma, 0, 0, 0b1111110, {0, 0, 0, 6, 0}, {0, 0, 0, 20, 0});
+  TryConditionalRestrictions(comma, 1, 0, 0b0000001, {0, 0, 0, 0, 0}, {0, 0, 0, 0, 0});
+}
+
 // a comma also shows up between the selectors of a single rule
 TEST(TimeParsing, CommaBetweenSelectors) {
   const std::string condition = "Oct-Mar, 07:00-19:00; Apr-Sep, 07:00-21:30";

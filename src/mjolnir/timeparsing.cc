@@ -243,6 +243,24 @@ bool at_rule_end(const TokenCursor& t) {
          t.kind() == TokenKind::kEnd;
 }
 
+bool part_of_selector(TokenKind kind) {
+  return kind == TokenKind::kWeekday || kind == TokenKind::kMonth || kind == TokenKind::kNumber ||
+         kind == TokenKind::kYear || kind == TokenKind::kNth || kind == TokenKind::kHoliday ||
+         kind == TokenKind::kComma || kind == TokenKind::kDash;
+}
+
+// A selector followed by times of its own, by 24/7 or by an `off` is a rule of its own, e.g. the Sa
+// of `Mo-Fr 18:00-11:00 AND Sa 00:00-10:00`, while the Mo-Fr of `08:00-20:00 Mo-Fr` states the
+// weekdays of the rule that precedes it
+bool starts_another_rule(const TokenCursor& t) {
+  size_t ahead = 0;
+  while (part_of_selector(t.kind(ahead))) {
+    ++ahead;
+  }
+  const TokenKind kind = t.kind(ahead);
+  return kind == TokenKind::kTime || kind == TokenKind::kAlways || kind == TokenKind::kOff;
+}
+
 // consume the rest of the rule, the next one starts after a semicolon
 void skip_rule(TokenCursor& t) {
   while (t.kind() != TokenKind::kSemicolon && t.kind() != TokenKind::kEnd) {
@@ -567,6 +585,17 @@ RuleResult parse_rule(TokenCursor& t, std::vector<uint64_t>& time_domains) {
 
   if (t.kind() == TokenKind::kTime) {
     const RuleResult result = parse_times(t, times);
+    if (result != RuleResult::kOk) {
+      return result;
+    }
+  }
+
+  // mappers also write the selector behind the times, e.g. `08:00-20:00 Mo-Fr`. As with a comma
+  // between selectors, only one the rule still lacks can be meant that way
+  while (!starts_another_rule(t) && ((t.kind() == TokenKind::kWeekday && weekdays.dow == 0) ||
+                                     (starts_dates(t) && dates.empty()))) {
+    const RuleResult result =
+        t.kind() == TokenKind::kWeekday ? parse_weekdays(t, weekdays) : parse_dates(t, dates);
     if (result != RuleResult::kOk) {
       return result;
     }
