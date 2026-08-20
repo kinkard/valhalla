@@ -1,6 +1,9 @@
 ## UNRELEASED
 * **Removed**
+   * REMOVED: Transifex and all locale JSONs [#6210](https://github.com/valhalla/valhalla/pull/6210)
 * **Bug Fix**
+   * ADDED: .po file based translation workflow [#6210](https://github.com/valhalla/valhalla/pull/6210)
+   * FIXED: bg-BG spoke the literal text `<STREET_NAME>` in some case(s) [#6210](https://github.com/valhalla/valhalla/pull/6210)
    * FIXED: don't advance bounding-circle iterator past the end [#6241](https://github.com/valhalla/valhalla/pull/6241)
    * FIXED: update final path distance in recosting for `CostMatrix` [#6258](https://github.com/valhalla/valhalla/pull/6258)
 * **Enhancement**
