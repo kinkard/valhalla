@@ -57,7 +57,7 @@ All state lives in the `.pot`/`.po` files — no external service involved.
 | `po_tools.py po2json [--out DIR]` | Generate the JSONs odin reads from the gettext files (fuzzy/empty → English); run it after any `.pot`/`.po` change and commit the result, `python3` is all it needs |
 | `po_tools.py lint [--fix] [--strict]` | Check placeholder tokens (errors on tokens Odin would never substitute), that non-`phrases` sub-keys carry the `replacement` sort marker, and that `.pot`/`.po` are sorted; `--fix` inserts missing markers and sorts in place instead of erroring (and needs `polib` for that); `--strict` also fails on warnings. |
 | `po_tools.py stats [langs]` | Per-language coverage as JSON (object per language: translated/fuzzy/untranslated/total/percent); "translated" = non-fuzzy msgstr that differs from English (carry-overs and fuzzy don't count). Understates English variants (en-GB/en-AU) |
-| `po_tools.py print-posix-locales` | Print every language's POSIX locale; used by the `localedef` test target |
+| `po_tools.py print-posix-locales` | Print every language's POSIX locale, e.g. to feed `localedef` by hand |
 | `msgattrib --untranslated --fuzzy <lang>.po` | List what needs work in a language |
 | `msgfmt --check --statistics <lang>.po` | Validate syntax, show translation coverage |
 
