@@ -298,6 +298,12 @@ add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/test/data/nh_ar_tiles/2/000/765/07
 add_custom_target(nh_ar_tiles DEPENDS ${CMAKE_BINARY_DIR}/test/data/nh_ar_tiles/2/000/765/074.gph)
 set_target_properties(nh_ar_tiles PROPERTIES FOLDER "Tests")
 
+# interpreter for listing the locales localedef compiles; nothing else in the build needs one
+find_program(PYTHON_INTERPRETER NAMES python3 python)
+if(NOT PYTHON_INTERPRETER)
+  message(FATAL_ERROR "python3 is required to list the narrative locales for the localedef target")
+endif()
+
 file(GLOB locales "${VALHALLA_SOURCE_DIR}/locales/*.po" "${VALHALLA_SOURCE_DIR}/locales/valhalla.pot")
 add_custom_command(OUTPUT .locales.timestamp
   COMMAND /bin/bash -c "for loc in $(${PYTHON_INTERPRETER} po_tools.py print-posix-locales); do \

@@ -17,6 +17,8 @@
    * ADDED: documentation page for the pedestrian areas feature [#6266](https://github.com/valhalla/valhalla/pull/6266)
    * ADDED: Add use_distance to truck, bus, taxi, motorcycle and motor_scooter cost [#6214](https://github.com/valhalla/valhalla/pull/6214)
    * ADDED: limitations, future work and performance sections to the pedestrian areas documentation [#6279](https://github.com/valhalla/valhalla/pull/6279)
+   * CHANGED: read the gettext locales with a stdlib parser, so building needs no `polib` pip package [#6292](https://github.com/valhalla/valhalla/pull/6292)
+   * CHANGED: commit the generated locale JSONs and check them in CI, so building needs no python at all [#6293](https://github.com/valhalla/valhalla/pull/6293)
 
 ## Release Date: 2026-07-24 Valhalla 3.8.3
 * **Removed**
