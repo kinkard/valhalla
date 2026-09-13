@@ -122,11 +122,7 @@ void DirectedEdge::set_length(const double length) {
     throw std::runtime_error("DirectedEdgeBuilder: exceeded maximum edge length");
   }
 
-  uint32_t rounded = std::round(length);
-  if (rounded < kMinEdgeLength) {
-    rounded = kMinEdgeLength;
-  }
-  length_ = rounded;
+  length_ = std::max(static_cast<uint32_t>(std::round(length)), kMinEdgeLength);
 }
 
 // Sets the weighted_grade factor (0-15) for the edge.
